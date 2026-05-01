@@ -86,6 +86,39 @@ def search_kor_stock(query: str):
     return None
 
 
+def calc_debt_to_equity(t) -> float | None:
+    """밸런스시트에서 총부채/자기자본 직접 계산 (일반적인 부채비율)."""
+    try:
+        bs = t.balance_sheet
+        if bs is None or bs.empty:
+            return None
+
+        # 총부채 찾기
+        total_liabilities = None
+        for key in ["Total Liabilities Net Minority Interest", "Total Liabilities"]:
+            if key in bs.index:
+                val = bs.loc[key].iloc[0]
+                if pd.notna(val):
+                    total_liabilities = val
+                    break
+
+        # 자기자본 찾기
+        equity = None
+        for key in ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"]:
+            if key in bs.index:
+                val = bs.loc[key].iloc[0]
+                if pd.notna(val) and val > 0:
+                    equity = val
+                    break
+
+        if total_liabilities is not None and equity:
+            return (total_liabilities / equity) * 100
+        return None
+    except Exception as e:
+        logger.debug(f"부채비율 계산 실패: {e}")
+        return None
+
+
 # ============================================================
 # 한국 주식 데이터 (yfinance + 네이버)
 # ============================================================
@@ -95,6 +128,7 @@ def get_kor_stock_data(code: str, name: str):
         ticker = None
         info = None
         hist = None
+        t_obj = None
         for suffix in [".KS", ".KQ"]:
             try:
                 t = yf.Ticker(f"{code}{suffix}")
@@ -103,11 +137,14 @@ def get_kor_stock_data(code: str, name: str):
                     ticker = f"{code}{suffix}"
                     info = test_info
                     hist = t.history(period="1y")
+                    t_obj = t
                     break
             except Exception:
                 continue
         if not info:
             return None
+
+        debt_ratio = calc_debt_to_equity(t_obj) if t_obj else info.get("debtToEquity")
 
         return {
             "code": code, "name": name, "ticker": ticker,
@@ -122,7 +159,7 @@ def get_kor_stock_data(code: str, name: str):
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "roe": info.get("returnOnEquity"),
             "operating_margin": info.get("operatingMargins"),
-            "debt_to_equity": info.get("debtToEquity"),
+            "debt_to_equity": debt_ratio,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "beta": info.get("beta"),
@@ -145,6 +182,8 @@ def get_us_stock_data(ticker: str):
         if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
             return None
         hist = t.history(period="1y")
+        debt_ratio = calc_debt_to_equity(t)
+
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
             "ticker": ticker.upper(),
@@ -159,7 +198,7 @@ def get_us_stock_data(ticker: str):
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "roe": info.get("returnOnEquity"),
             "operating_margin": info.get("operatingMargins"),
-            "debt_to_equity": info.get("debtToEquity"),
+            "debt_to_equity": debt_ratio,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "beta": info.get("beta"),
