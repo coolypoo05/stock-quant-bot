@@ -86,6 +86,73 @@ def search_kor_stock(query: str):
     return None
 
 
+def calc_ttm_operating_margin(t) -> float | None:
+    """손익계산서에서 TTM(최근 12개월) 영업이익률 직접 계산."""
+    try:
+        # 분기 재무제표로 TTM 계산 (최근 4분기 합산)
+        qf = t.quarterly_financials
+        if qf is not None and not qf.empty and qf.shape[1] >= 4:
+            op_income = None
+            revenue = None
+            for key in ["Operating Income", "Operating Revenue"]:
+                if key in qf.index:
+                    val = qf.loc[key].iloc[:4].sum()
+                    if pd.notna(val):
+                        if key == "Operating Income":
+                            op_income = val
+                        else:
+                            revenue = val
+            # 매출 찾기
+            for key in ["Total Revenue", "Net Revenue", "Revenue"]:
+                if key in qf.index:
+                    val = qf.loc[key].iloc[:4].sum()
+                    if pd.notna(val) and val > 0:
+                        revenue = val
+                        break
+            if op_income is not None and revenue and revenue > 0:
+                return op_income / revenue
+        # 분기 데이터 없으면 연간 최신으로 fallback
+        af = t.financials
+        if af is not None and not af.empty:
+            op_income = None
+            revenue = None
+            for key in ["Operating Income"]:
+                if key in af.index:
+                    val = af.loc[key].iloc[0]
+                    if pd.notna(val):
+                        op_income = val
+            for key in ["Total Revenue", "Net Revenue", "Revenue"]:
+                if key in af.index:
+                    val = af.loc[key].iloc[0]
+                    if pd.notna(val) and val > 0:
+                        revenue = val
+                        break
+            if op_income is not None and revenue and revenue > 0:
+                return op_income / revenue
+        return None
+    except Exception as e:
+        logger.debug(f"TTM 영업이익률 계산 실패: {e}")
+        return None
+
+
+# 영업이익률이 의미없는 섹터 (지주/금융/부동산)
+EXCLUDE_OP_MARGIN_SECTORS = {
+    "Financial Services", "Financial", "Real Estate",
+    "금융", "보험", "은행", "지주", "부동산",
+}
+
+
+def is_holding_company(data: dict) -> bool:
+    """지주/금융/부동산 계열 여부 판단."""
+    sector = data.get("sector", "") or ""
+    industry = data.get("industry", "") or ""
+    name = data.get("name", "") or ""
+    combined = f"{sector} {industry} {name}".lower()
+    keywords = ["지주", "holding", "financial", "insurance", "bank", "real estate",
+                "금융", "보험", "은행", "부동산", "investment"]
+    return any(k in combined for k in keywords)
+
+
 def calc_debt_to_equity(t) -> float | None:
     """밸런스시트에서 총부채/자기자본 직접 계산 (일반적인 부채비율)."""
     try:
@@ -145,6 +212,7 @@ def get_kor_stock_data(code: str, name: str):
             return None
 
         debt_ratio = calc_debt_to_equity(t_obj) if t_obj else info.get("debtToEquity")
+        op_margin = calc_ttm_operating_margin(t_obj) if t_obj else info.get("operatingMargins")
 
         return {
             "code": code, "name": name, "ticker": ticker,
@@ -158,11 +226,13 @@ def get_kor_stock_data(code: str, name: str):
             "pb_ratio": info.get("priceToBook"),
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "roe": info.get("returnOnEquity"),
-            "operating_margin": info.get("operatingMargins"),
+            "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "beta": info.get("beta"),
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
             "history": hist,
             "currency": "KRW", "market": "KR",
         }
@@ -183,6 +253,7 @@ def get_us_stock_data(ticker: str):
             return None
         hist = t.history(period="1y")
         debt_ratio = calc_debt_to_equity(t)
+        op_margin = calc_ttm_operating_margin(t)
 
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
@@ -197,11 +268,13 @@ def get_us_stock_data(ticker: str):
             "pb_ratio": info.get("priceToBook"),
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "roe": info.get("returnOnEquity"),
-            "operating_margin": info.get("operatingMargins"),
+            "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "beta": info.get("beta"),
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
             "history": hist,
             "currency": "USD", "market": "US",
         }
@@ -324,6 +397,7 @@ def score_quality(data):
     """퀄리티 팩터 (높은 ROE/영업이익률, 낮은 부채비율, EPS 안정성)."""
     scores = []
     details = []
+    holding = is_holding_company(data)
 
     roe = data.get("roe")
     if roe is not None:
@@ -344,33 +418,49 @@ def score_quality(data):
     op = data.get("operating_margin")
     if op is not None:
         op_pct = op * 100
-        if op_pct > 20:
-            s = 90
-        elif op_pct > 15:
-            s = 75
-        elif op_pct > 10:
-            s = 60
-        elif op_pct > 5:
-            s = 40
+        if holding:
+            # 지주/금융은 영업이익률 점수화 제외, 참고용으로만 표시
+            details.append(f"영업이익률: {op_pct:.2f}% (지주/금융사 특성상 점수 제외)")
         else:
-            s = 20
-        scores.append(s)
-        details.append(f"영업이익률: {op_pct:.2f}%")
+            if op_pct > 20:
+                s = 90
+            elif op_pct > 15:
+                s = 75
+            elif op_pct > 10:
+                s = 60
+            elif op_pct > 5:
+                s = 40
+            else:
+                s = 20
+            scores.append(s)
+            details.append(f"영업이익률: {op_pct:.2f}%")
 
     debt = data.get("debt_to_equity")
     if debt is not None:
-        if debt < 30:
-            s, g = 90, "매우 안정"
-        elif debt < 50:
-            s, g = 75, "안정"
-        elif debt < 100:
-            s, g = 55, "보통"
-        elif debt < 200:
-            s, g = 35, "높음"
+        if holding:
+            # 지주/금융은 부채비율 기준 완화
+            if debt < 100:
+                s, g = 80, "안정"
+            elif debt < 200:
+                s, g = 65, "보통"
+            elif debt < 400:
+                s, g = 45, "높음"
+            else:
+                s, g = 25, "매우 높음"
+            details.append(f"부채비율: {debt:.0f}% ({g}, 지주/금융 기준)")
         else:
-            s, g = 15, "매우 높음"
+            if debt < 30:
+                s, g = 90, "매우 안정"
+            elif debt < 50:
+                s, g = 75, "안정"
+            elif debt < 100:
+                s, g = 55, "보통"
+            elif debt < 200:
+                s, g = 35, "높음"
+            else:
+                s, g = 15, "매우 높음"
+            details.append(f"부채비율: {debt:.0f}% ({g})")
         scores.append(s)
-        details.append(f"부채비율: {debt:.0f}% ({g})")
 
     # EPS 안정성 (적자 여부 + 흑자 수준)
     eps = data.get("eps")
