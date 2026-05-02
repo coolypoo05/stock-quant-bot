@@ -247,6 +247,86 @@ def calc_debt_to_equity(t) -> float | None:
 
 
 # ============================================================
+# 네이버 금융 fallback (한국 주식 PER/PBR)
+# ============================================================
+
+def get_naver_per_pbr(code: str) -> dict:
+    """네이버 금융에서 PER, PBR 파싱."""
+    result = {"per": None, "pbr": None}
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={code}"
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # PER, PBR은 .blind 태그로 감싸진 테이블에 있음
+        table = soup.select_one("table.per_table")
+        if table:
+            for em in table.select("em"):
+                text = em.get_text(strip=True).replace(",", "")
+                try:
+                    val = float(text)
+                    em_id = em.get("id", "")
+                    if "PER" in em_id or "per" in em_id.lower():
+                        result["per"] = val
+                    elif "PBR" in em_id or "pbr" in em_id.lower():
+                        result["pbr"] = val
+                except ValueError:
+                    continue
+
+        # fallback: 텍스트에서 직접 추출
+        if result["per"] is None or result["pbr"] is None:
+            text = soup.get_text(" ", strip=True)
+            per_m = re.search(r'PER\s*([\d.]+)배', text)
+            pbr_m = re.search(r'PBR\s*([\d.]+)배', text)
+            if per_m and result["per"] is None:
+                result["per"] = float(per_m.group(1))
+            if pbr_m and result["pbr"] is None:
+                result["pbr"] = float(pbr_m.group(1))
+
+    except Exception as e:
+        logger.debug(f"네이버 PER/PBR 파싱 실패 ({code}): {e}")
+    return result
+
+
+def calc_eps_from_financials(t_obj) -> float | None:
+    """재무제표에서 EPS 직접 계산 (당기순이익 / 발행주식수)."""
+    try:
+        # 분기 합산으로 TTM 순이익 계산
+        qf = t_obj.quarterly_financials
+        shares = t_obj.info.get("sharesOutstanding")
+        if not shares or shares <= 0:
+            return None
+
+        net_income = None
+        if qf is not None and not qf.empty and qf.shape[1] >= 4:
+            for key in ["Net Income", "Net Income Common Stockholders"]:
+                if key in qf.index:
+                    val = qf.loc[key].iloc[:4].sum()
+                    if pd.notna(val):
+                        net_income = val
+                        break
+
+        # 분기 없으면 연간
+        if net_income is None:
+            af = t_obj.financials
+            if af is not None and not af.empty:
+                for key in ["Net Income", "Net Income Common Stockholders"]:
+                    if key in af.index:
+                        val = af.loc[key].iloc[0]
+                        if pd.notna(val):
+                            net_income = val
+                            break
+
+        if net_income is not None:
+            return net_income / shares
+        return None
+    except Exception as e:
+        logger.debug(f"EPS 계산 실패: {e}")
+        return None
+
+
+# ============================================================
 # 한국 주식 데이터 (yfinance + 네이버)
 # ============================================================
 
@@ -275,16 +355,35 @@ def get_kor_stock_data(code: str, name: str):
         op_margin = calc_ttm_operating_margin(t_obj) if t_obj else info.get("operatingMargins")
         ev_ebitda = calc_ev_ebitda(t_obj, info) if t_obj else None
 
+        # PER, PBR: yfinance → None이면 네이버 fallback
+        pe_ratio = info.get("trailingPE")
+        pb_ratio = info.get("priceToBook")
+        if pe_ratio is None or pb_ratio is None:
+            naver = get_naver_per_pbr(code)
+            if pe_ratio is None and naver["per"]:
+                pe_ratio = naver["per"]
+                logger.info(f"PER 네이버 fallback: {code} = {pe_ratio}")
+            if pb_ratio is None and naver["pbr"]:
+                pb_ratio = naver["pbr"]
+                logger.info(f"PBR 네이버 fallback: {code} = {pb_ratio}")
+
+        # EPS: yfinance → None이면 재무제표 직접 계산
+        eps = info.get("trailingEps")
+        if eps is None and t_obj:
+            eps = calc_eps_from_financials(t_obj)
+            if eps:
+                logger.info(f"EPS 재무제표 계산: {code} = {eps:.2f}")
+
         return {
             "code": code, "name": name, "ticker": ticker,
             "price": info.get("currentPrice") or info.get("regularMarketPrice"),
             "previous_close": info.get("previousClose"),
             "market_cap": info.get("marketCap"),
-            "pe_ratio": info.get("trailingPE"),
+            "pe_ratio": pe_ratio,
             "forward_pe": info.get("forwardPE"),
-            "eps": info.get("trailingEps"),
+            "eps": eps,
             "forward_eps": info.get("forwardEps"),
-            "pb_ratio": info.get("priceToBook"),
+            "pb_ratio": pb_ratio,
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "ev_ebitda": ev_ebitda,
             "roe": info.get("returnOnEquity"),
