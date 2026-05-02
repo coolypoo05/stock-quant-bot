@@ -564,6 +564,7 @@ def calc_revenue_growth(t_obj) -> float | None:
         return None
 
 
+def score_value(data):
     """밸류 팩터 (낮은 PER/ForwardPER/PBR/PSR이 좋음)."""
     scores = []
     details = []
