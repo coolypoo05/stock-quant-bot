@@ -153,6 +153,66 @@ def is_holding_company(data: dict) -> bool:
     return any(k in combined for k in keywords)
 
 
+def calc_ev_ebitda(t, info: dict) -> float | None:
+    """EV/EBITDA 직접 계산."""
+    try:
+        # EV = 시가총액 + 총부채 - 현금
+        market_cap = info.get("marketCap")
+        if not market_cap:
+            return None
+
+        bs = t.balance_sheet
+        if bs is None or bs.empty:
+            return None
+
+        # 총부채
+        total_debt = 0
+        for key in ["Total Debt", "Long Term Debt", "Total Liabilities Net Minority Interest"]:
+            if key in bs.index:
+                val = bs.loc[key].iloc[0]
+                if pd.notna(val):
+                    total_debt = val
+                    break
+
+        # 현금 및 현금성자산
+        cash = 0
+        for key in ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"]:
+            if key in bs.index:
+                val = bs.loc[key].iloc[0]
+                if pd.notna(val):
+                    cash = val
+                    break
+
+        ev = market_cap + total_debt - cash
+
+        # EBITDA = 영업이익 + 감가상각
+        qf = t.quarterly_financials
+        ebitda = None
+        if qf is not None and not qf.empty and qf.shape[1] >= 4:
+            for key in ["EBITDA", "Normalized EBITDA"]:
+                if key in qf.index:
+                    val = qf.loc[key].iloc[:4].sum()
+                    if pd.notna(val) and val > 0:
+                        ebitda = val
+                        break
+        if not ebitda:
+            af = t.financials
+            if af is not None and not af.empty:
+                for key in ["EBITDA", "Normalized EBITDA"]:
+                    if key in af.index:
+                        val = af.loc[key].iloc[0]
+                        if pd.notna(val) and val > 0:
+                            ebitda = val
+                            break
+
+        if ebitda and ebitda > 0 and ev > 0:
+            return ev / ebitda
+        return None
+    except Exception as e:
+        logger.debug(f"EV/EBITDA 계산 실패: {e}")
+        return None
+
+
 def calc_debt_to_equity(t) -> float | None:
     """밸런스시트에서 총부채/자기자본 직접 계산 (일반적인 부채비율)."""
     try:
@@ -213,6 +273,7 @@ def get_kor_stock_data(code: str, name: str):
 
         debt_ratio = calc_debt_to_equity(t_obj) if t_obj else info.get("debtToEquity")
         op_margin = calc_ttm_operating_margin(t_obj) if t_obj else info.get("operatingMargins")
+        ev_ebitda = calc_ev_ebitda(t_obj, info) if t_obj else None
 
         return {
             "code": code, "name": name, "ticker": ticker,
@@ -225,6 +286,7 @@ def get_kor_stock_data(code: str, name: str):
             "forward_eps": info.get("forwardEps"),
             "pb_ratio": info.get("priceToBook"),
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
+            "ev_ebitda": ev_ebitda,
             "roe": info.get("returnOnEquity"),
             "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
@@ -254,6 +316,7 @@ def get_us_stock_data(ticker: str):
         hist = t.history(period="1y")
         debt_ratio = calc_debt_to_equity(t)
         op_margin = calc_ttm_operating_margin(t)
+        ev_ebitda = calc_ev_ebitda(t, info)
 
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
@@ -267,6 +330,7 @@ def get_us_stock_data(ticker: str):
             "forward_eps": info.get("forwardEps"),
             "pb_ratio": info.get("priceToBook"),
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
+            "ev_ebitda": ev_ebitda,
             "roe": info.get("returnOnEquity"),
             "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
@@ -368,6 +432,7 @@ def score_value(data):
     # EPS 성장률 (Trailing → Forward, 높을수록 좋음)
     eps = data.get("eps")
     feps = data.get("forward_eps")
+    eps_growth = None
     if eps and feps and eps > 0 and feps > 0:
         eps_growth = ((feps - eps) / abs(eps)) * 100
         if eps_growth > 30:
@@ -387,6 +452,41 @@ def score_value(data):
         details.append(f"EPS 성장률: {sign}{eps_growth:.1f}% ({g}) ★")
     elif eps:
         details.append(f"EPS: {eps:.2f} (Forward EPS 데이터 없음)")
+
+    # EV/EBITDA (낮을수록 저평가)
+    ev_ebitda = data.get("ev_ebitda")
+    if ev_ebitda and ev_ebitda > 0:
+        if ev_ebitda < 6:
+            s, g = 95, "매우 저평가"
+        elif ev_ebitda < 10:
+            s, g = 80, "저평가"
+        elif ev_ebitda < 15:
+            s, g = 62, "적정"
+        elif ev_ebitda < 20:
+            s, g = 42, "다소 비쌈"
+        else:
+            s, g = 22, "고평가"
+        scores.append(s)
+        details.append(f"EV/EBITDA: {ev_ebitda:.2f}배 ({g})")
+
+    # PEG (PER / EPS성장률, 1.0 이하면 성장 대비 저평가)
+    pe = data.get("pe_ratio")
+    if pe and pe > 0 and eps_growth and eps_growth > 0:
+        peg = pe / eps_growth
+        if peg < 0.5:
+            s, g = 95, "매우 저평가"
+        elif peg < 1.0:
+            s, g = 80, "저평가"
+        elif peg < 1.5:
+            s, g = 60, "적정"
+        elif peg < 2.0:
+            s, g = 40, "다소 비쌈"
+        else:
+            s, g = 20, "고평가"
+        scores.append(s)
+        details.append(f"PEG: {peg:.2f} ({g})")
+    elif pe and pe > 0 and eps_growth and eps_growth <= 0:
+        details.append(f"PEG: 산출불가 (EPS 감소 중)")
 
     if not scores:
         return 0, ["데이터 부족"]
