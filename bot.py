@@ -387,6 +387,8 @@ def get_kor_stock_data(code: str, name: str):
         debt_ratio = calc_debt_to_equity(t_obj) if t_obj else info.get("debtToEquity")
         op_margin = calc_ttm_operating_margin(t_obj) if t_obj else info.get("operatingMargins")
         ev_ebitda = calc_ev_ebitda(t_obj, info) if t_obj else None
+        interest_coverage = calc_interest_coverage(t_obj) if t_obj else None
+        revenue_growth = calc_revenue_growth(t_obj) if t_obj else None
 
         # PER, PBR: yfinance → None이면 네이버 fallback
         pe_ratio = info.get("trailingPE")
@@ -425,8 +427,11 @@ def get_kor_stock_data(code: str, name: str):
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "ev_ebitda": ev_ebitda,
             "roe": info.get("returnOnEquity"),
+            "roa": info.get("returnOnAssets"),
             "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
+            "interest_coverage": interest_coverage,
+            "revenue_growth": revenue_growth,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "beta": info.get("beta"),
@@ -454,6 +459,8 @@ def get_us_stock_data(ticker: str):
         debt_ratio = calc_debt_to_equity(t)
         op_margin = calc_ttm_operating_margin(t)
         ev_ebitda = calc_ev_ebitda(t, info)
+        interest_coverage = calc_interest_coverage(t)
+        revenue_growth = calc_revenue_growth(t)
 
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
@@ -469,8 +476,11 @@ def get_us_stock_data(ticker: str):
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "ev_ebitda": ev_ebitda,
             "roe": info.get("returnOnEquity"),
+            "roa": info.get("returnOnAssets"),
             "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
+            "interest_coverage": interest_coverage,
+            "revenue_growth": revenue_growth,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "beta": info.get("beta"),
@@ -488,7 +498,72 @@ def get_us_stock_data(ticker: str):
 # 팩터 스코어링
 # ============================================================
 
-def score_value(data):
+def calc_interest_coverage(t_obj) -> float | None:
+    """이자보상배율 = 영업이익 / 이자비용 (TTM)."""
+    try:
+        qf = t_obj.quarterly_financials
+        op_income = None
+        interest_exp = None
+
+        if qf is not None and not qf.empty and qf.shape[1] >= 4:
+            for key in ["Operating Income"]:
+                if key in qf.index:
+                    val = qf.loc[key].iloc[:4].sum()
+                    if pd.notna(val):
+                        op_income = val
+            for key in ["Interest Expense", "Interest Expense Non Operating"]:
+                if key in qf.index:
+                    val = abs(qf.loc[key].iloc[:4].sum())
+                    if pd.notna(val) and val > 0:
+                        interest_exp = val
+                        break
+
+        if op_income is not None and interest_exp and interest_exp > 0:
+            return op_income / interest_exp
+        return None
+    except Exception as e:
+        logger.debug(f"이자보상배율 계산 실패: {e}")
+        return None
+
+
+def calc_revenue_growth(t_obj) -> float | None:
+    """매출 성장률 = YoY (전년 대비 올해 매출 증가율, TTM 기준)."""
+    try:
+        qf = t_obj.quarterly_financials
+        if qf is None or qf.empty or qf.shape[1] < 8:
+            # 분기 8개 없으면 연간으로 시도
+            af = t_obj.financials
+            if af is not None and not af.empty and af.shape[1] >= 2:
+                rev = None
+                prev_rev = None
+                for key in ["Total Revenue", "Revenue"]:
+                    if key in af.index:
+                        rev = af.loc[key].iloc[0]
+                        prev_rev = af.loc[key].iloc[1]
+                        break
+                if rev and prev_rev and prev_rev > 0:
+                    return ((rev - prev_rev) / abs(prev_rev)) * 100
+            return None
+
+        # 최근 4분기 vs 직전 4분기 비교
+        rev_key = None
+        for key in ["Total Revenue", "Revenue"]:
+            if key in qf.index:
+                rev_key = key
+                break
+        if not rev_key:
+            return None
+
+        recent = qf.loc[rev_key].iloc[:4].sum()
+        prev = qf.loc[rev_key].iloc[4:8].sum()
+        if prev and prev > 0:
+            return ((recent - prev) / abs(prev)) * 100
+        return None
+    except Exception as e:
+        logger.debug(f"매출 성장률 계산 실패: {e}")
+        return None
+
+
     """밸류 팩터 (낮은 PER/ForwardPER/PBR/PSR이 좋음)."""
     scores = []
     details = []
@@ -709,6 +784,58 @@ def score_quality(data):
             s, g = 10, "적자"
             details.append(f"EPS: {eps:.2f} ({g}) ⚠️")
         scores.append(s)
+
+    # ROA (총자산 대비 이익률, ROE 보완)
+    roa = data.get("roa")
+    if roa is not None:
+        roa_pct = roa * 100
+        if roa_pct > 15:
+            s, g = 95, "매우 우수"
+        elif roa_pct > 10:
+            s, g = 80, "우수"
+        elif roa_pct > 5:
+            s, g = 65, "양호"
+        elif roa_pct > 2:
+            s, g = 45, "평범"
+        else:
+            s, g = 25, "낮음"
+        scores.append(s)
+        details.append(f"ROA: {roa_pct:.2f}% ({g})")
+
+    # 이자보상배율 (영업이익 / 이자비용, 높을수록 안전)
+    ic = data.get("interest_coverage")
+    if ic is not None:
+        if ic > 10:
+            s, g = 95, "매우 안전"
+        elif ic > 5:
+            s, g = 80, "안전"
+        elif ic > 3:
+            s, g = 60, "보통"
+        elif ic > 1:
+            s, g = 35, "주의"
+        else:
+            s, g = 10, "위험 ⚠️"
+        scores.append(s)
+        details.append(f"이자보상배율: {ic:.1f}배 ({g})")
+
+    # 매출 성장률 (YoY)
+    rev_growth = data.get("revenue_growth")
+    if rev_growth is not None:
+        sign = "+" if rev_growth >= 0 else ""
+        if rev_growth > 20:
+            s, g = 95, "고성장"
+        elif rev_growth > 10:
+            s, g = 80, "성장"
+        elif rev_growth > 3:
+            s, g = 65, "완만한 성장"
+        elif rev_growth > -3:
+            s, g = 50, "보합"
+        elif rev_growth > -10:
+            s, g = 30, "역성장"
+        else:
+            s, g = 15, "급감"
+        scores.append(s)
+        details.append(f"매출 성장률: {sign}{rev_growth:.1f}% ({g})")
 
     if not scores:
         return 0, ["데이터 부족"]
