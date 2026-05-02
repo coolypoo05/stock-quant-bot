@@ -289,6 +289,39 @@ def get_naver_per_pbr(code: str) -> dict:
     return result
 
 
+def get_wisereport_forward_eps(code: str) -> float | None:
+    """wisereport 컨센서스에서 Forward EPS 파싱."""
+    try:
+        url = f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={code}"
+        referer = f"https://finance.naver.com/item/coinfo.naver?code={code}"
+        res = requests.get(url, headers={**HEADERS, "Referer": referer}, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        # wisereport 컨센서스 테이블에서 EPS 추출
+        # 패턴: "EPS (원) 숫자 숫자 숫자" 형태로 현재연도/다음연도 순서
+        m = re.search(r'EPS\s*[\(（]?원?[\)）]?\s*([\d,]+)\s+([\d,]+)', text)
+        if m:
+            # 두 번째 값이 다음 연도 Forward EPS
+            forward_eps = float(m.group(2).replace(",", ""))
+            if forward_eps > 0:
+                logger.info(f"Forward EPS wisereport: {code} = {forward_eps}")
+                return forward_eps
+
+        # 추가 패턴 시도
+        m2 = re.search(r'컨센서스.*?EPS.*?([\d,]+)', text)
+        if m2:
+            val = float(m2.group(1).replace(",", ""))
+            if val > 0:
+                return val
+
+        return None
+    except Exception as e:
+        logger.debug(f"wisereport Forward EPS 파싱 실패 ({code}): {e}")
+        return None
+
+
 def calc_eps_from_financials(t_obj) -> float | None:
     """재무제표에서 EPS 직접 계산 (당기순이익 / 발행주식수)."""
     try:
@@ -374,6 +407,11 @@ def get_kor_stock_data(code: str, name: str):
             if eps:
                 logger.info(f"EPS 재무제표 계산: {code} = {eps:.2f}")
 
+        # Forward EPS: yfinance → None이면 wisereport 파싱
+        forward_eps = info.get("forwardEps")
+        if forward_eps is None:
+            forward_eps = get_wisereport_forward_eps(code)
+
         return {
             "code": code, "name": name, "ticker": ticker,
             "price": info.get("currentPrice") or info.get("regularMarketPrice"),
@@ -382,7 +420,7 @@ def get_kor_stock_data(code: str, name: str):
             "pe_ratio": pe_ratio,
             "forward_pe": info.get("forwardPE"),
             "eps": eps,
-            "forward_eps": info.get("forwardEps"),
+            "forward_eps": forward_eps,
             "pb_ratio": pb_ratio,
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "ev_ebitda": ev_ebitda,
