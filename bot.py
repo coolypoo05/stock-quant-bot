@@ -1069,10 +1069,20 @@ def calc_dividend_growth(t_obj) -> dict:
         years = list(annual.index)
         amounts = list(annual.values)
 
-        # 연도별 성장률 (직전 배당이 0이면 계산 제외)
+        # 연도 사이 gap 채우기 (배당 없던 연도를 0으로 채움)
+        full_years = list(range(min(years), max(years) + 1))
+        full_amounts = []
+        for y in full_years:
+            if y in years:
+                full_amounts.append(amounts[years.index(y)])
+            else:
+                full_amounts.append(0.0)
+        years = full_years
+        amounts = full_amounts
+
+        # 연도별 성장률 (직전 배당이 0이면 재개로 표시)
         for i in range(1, len(amounts)):
             if amounts[i-1] <= 0:
-                # 직전 배당이 0 → 배당 재개로 표시
                 if amounts[i] > 0:
                     result["growth_rates"].append((years[i], None))  # None = 재개
                 continue
