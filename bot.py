@@ -1069,21 +1069,29 @@ def calc_dividend_growth(t_obj) -> dict:
         years = list(annual.index)
         amounts = list(annual.values)
 
-        # 연도별 성장률
+        # 연도별 성장률 (직전 배당이 0이면 계산 제외)
         for i in range(1, len(amounts)):
-            if amounts[i-1] > 0:
-                rate = ((amounts[i] - amounts[i-1]) / amounts[i-1]) * 100
-                result["growth_rates"].append((years[i], rate))
+            if amounts[i-1] <= 0:
+                # 직전 배당이 0 → 배당 재개로 표시
+                if amounts[i] > 0:
+                    result["growth_rates"].append((years[i], None))  # None = 재개
+                continue
+            rate = ((amounts[i] - amounts[i-1]) / amounts[i-1]) * 100
+            result["growth_rates"].append((years[i], rate))
 
-        # CAGR (연평균 성장률)
-        if len(amounts) >= 2 and amounts[0] > 0:
-            n = len(amounts) - 1
-            result["cagr"] = ((amounts[-1] / amounts[0]) ** (1 / n) - 1) * 100
+        # CAGR: 배당이 0인 연도 제외하고 계산
+        valid_amounts = [(y, a) for y, a in zip(years, amounts) if a > 0]
+        if len(valid_amounts) >= 2:
+            first_year, first_amt = valid_amounts[0]
+            last_year, last_amt = valid_amounts[-1]
+            n = last_year - first_year
+            if n > 0:
+                result["cagr"] = ((last_amt / first_amt) ** (1 / n) - 1) * 100
 
-        # 연속 성장 횟수
+        # 연속 성장 횟수 (재개 연도는 제외)
         consecutive = 0
         for _, rate in reversed(result["growth_rates"]):
-            if rate > 0:
+            if rate is not None and rate > 0:
                 consecutive += 1
             else:
                 break
@@ -1117,9 +1125,12 @@ def get_dividend_info(data):
     if growth_rates:
         lines.append("배당 성장률 (연도별):")
         for year, rate in growth_rates:
-            sign = "+" if rate >= 0 else ""
-            emoji = "📈" if rate > 0 else "📉"
-            lines.append(f"  {emoji} {year}년: {sign}{rate:.1f}%")
+            if rate is None:
+                lines.append(f"  🔄 {year}년: 배당 재개")
+            else:
+                sign = "+" if rate >= 0 else ""
+                emoji = "📈" if rate > 0 else "📉"
+                lines.append(f"  {emoji} {year}년: {sign}{rate:.1f}%")
         if cagr is not None:
             sign = "+" if cagr >= 0 else ""
             lines.append(f"배당 CAGR: {sign}{cagr:.1f}%")
