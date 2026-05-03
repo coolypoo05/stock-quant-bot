@@ -43,7 +43,7 @@ HEADERS = {
     )
 }
 
-STOCK_MAP: dict = {}
+STOCK_MAP: dict = {}  # {종목명: {"code": "005930", "suffix": ".KS"}}
 KST = ZoneInfo("Asia/Seoul")
 
 
@@ -55,14 +55,16 @@ def load_stock_map():
     global STOCK_MAP
     logger.info("한국 종목 리스트 로딩 중...")
     try:
-        url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
-        params = {"method": "download", "searchType": "13"}
-        res = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        res.raise_for_status()
-        df = pd.read_html(io.StringIO(res.text))[0]
-        df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
-        for _, row in df.iterrows():
-            STOCK_MAP[row["회사명"]] = row["종목코드"]
+        # 코스피
+        for market, suffix in [("kospi", ".KS"), ("kosdaq", ".KQ")]:
+            url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
+            params = {"method": "download", "searchType": "13", "marketType": market}
+            res = requests.get(url, params=params, headers=HEADERS, timeout=30)
+            res.raise_for_status()
+            df = pd.read_html(io.StringIO(res.text))[0]
+            df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+            for _, row in df.iterrows():
+                STOCK_MAP[row["회사명"]] = {"code": row["종목코드"], "suffix": suffix}
         logger.info(f"한국 종목 리스트 로딩 완료: {len(STOCK_MAP)}개")
     except Exception as e:
         logger.error(f"종목 리스트 로딩 실패: {e}")
@@ -70,19 +72,22 @@ def load_stock_map():
 
 def search_kor_stock(query: str):
     query = query.strip()
+    # 6자리 코드로 검색
     if re.fullmatch(r"\d{6}", query):
-        for name, code in STOCK_MAP.items():
-            if code == query:
-                return query, name
-        return query, query
+        for name, info in STOCK_MAP.items():
+            if info["code"] == query:
+                return info["code"], name, info["suffix"]
+        return query, query, None  # suffix 모름
+    # 종목명으로 검색
     if query in STOCK_MAP:
-        return STOCK_MAP[query], query
-    for name, code in STOCK_MAP.items():
+        info = STOCK_MAP[query]
+        return info["code"], query, info["suffix"]
+    for name, info in STOCK_MAP.items():
         if name.lower() == query.lower():
-            return code, name
-    for name, code in STOCK_MAP.items():
+            return info["code"], name, info["suffix"]
+    for name, info in STOCK_MAP.items():
         if query.lower() in name.lower():
-            return code, name
+            return info["code"], name, info["suffix"]
     return None
 
 
@@ -363,13 +368,19 @@ def calc_eps_from_financials(t_obj) -> float | None:
 # 한국 주식 데이터 (yfinance + 네이버)
 # ============================================================
 
-def get_kor_stock_data(code: str, name: str):
+def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
     try:
         ticker = None
         info = None
         hist = None
         t_obj = None
-        for suffix in [".KS", ".KQ"]:
+
+        # 알고 있는 suffix가 있으면 그것 먼저, 없으면 둘 다 시도
+        suffixes = [known_suffix] if known_suffix else [".KS", ".KQ"]
+        if known_suffix:
+            suffixes = [known_suffix, ".KS" if known_suffix == ".KQ" else ".KQ"]
+
+        for suffix in suffixes:
             try:
                 t = yf.Ticker(f"{code}{suffix}")
                 test_info = t.info
@@ -1094,8 +1105,8 @@ def format_factor_message(data):
 def process_factor(query):
     result = search_kor_stock(query)
     if result:
-        code, name = result
-        data = get_kor_stock_data(code, name)
+        code, name, suffix = result
+        data = get_kor_stock_data(code, name, known_suffix=suffix)
         if data:
             return format_factor_message(data)
 
