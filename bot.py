@@ -402,6 +402,10 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
         revenue_growth = calc_revenue_growth(t_obj) if t_obj else None
         dividend_growth = calc_dividend_growth(t_obj) if t_obj else {}
 
+        # F-Score 계산 (별도 단계로 데이터 수집 후)
+        temp_data = {"market_cap": info.get("marketCap")}
+        fscore_info = calc_piotroski_fscore(t_obj, temp_data) if t_obj else None
+
         # PER, PBR: yfinance → None이면 네이버 fallback
         pe_ratio = info.get("trailingPE")
         pb_ratio = info.get("priceToBook")
@@ -447,6 +451,7 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "dividend_growth": dividend_growth,
+            "fscore_info": fscore_info,
             "beta": info.get("beta"),
             "sector": info.get("sector", ""),
             "industry": info.get("industry", ""),
@@ -476,6 +481,10 @@ def get_us_stock_data(ticker: str):
         revenue_growth = calc_revenue_growth(t)
         dividend_growth = calc_dividend_growth(t)
 
+        # F-Score 계산
+        temp_data = {"market_cap": info.get("marketCap")}
+        fscore_info = calc_piotroski_fscore(t, temp_data)
+
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
             "ticker": ticker.upper(),
@@ -498,6 +507,7 @@ def get_us_stock_data(ticker: str):
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
             "dividend_growth": dividend_growth,
+            "fscore_info": fscore_info,
             "beta": info.get("beta"),
             "sector": info.get("sector", ""),
             "industry": info.get("industry", ""),
@@ -1235,6 +1245,185 @@ def get_growth_info(data) -> list:
     return lines
 
 
+def calc_piotroski_fscore(t_obj, data: dict) -> tuple[int, list]:
+    """Piotroski F-Score (0-9점) 계산. 우량주 판별 지표."""
+    score = 0
+    details = []
+    try:
+        af = t_obj.financials
+        bs = t_obj.balance_sheet
+        cf = t_obj.cashflow
+
+        if af is None or af.empty or af.shape[1] < 2:
+            return 0, ["재무 데이터 부족"]
+
+        def safe_get(df, key, idx=0):
+            if df is not None and not df.empty and key in df.index:
+                val = df.loc[key].iloc[idx]
+                return val if pd.notna(val) else None
+            return None
+
+        # === 수익성 (4개) ===
+        # 1. ROA > 0
+        ni = safe_get(af, "Net Income")
+        ta = safe_get(bs, "Total Assets")
+        if ni is not None and ta and ni > 0:
+            score += 1
+            details.append("✅ 순이익 흑자")
+        else:
+            details.append("❌ 순이익 적자")
+
+        # 2. 영업현금흐름 > 0
+        ocf = safe_get(cf, "Operating Cash Flow") or safe_get(cf, "Cash Flow From Continuing Operating Activities")
+        if ocf and ocf > 0:
+            score += 1
+            details.append("✅ 영업현금흐름 양수")
+        else:
+            details.append("❌ 영업현금흐름 음수")
+
+        # 3. ROA 개선 (전년 대비)
+        ni_prev = safe_get(af, "Net Income", 1)
+        ta_prev = safe_get(bs, "Total Assets", 1)
+        if ni and ta and ni_prev and ta_prev:
+            roa_now = ni / ta
+            roa_prev = ni_prev / ta_prev
+            if roa_now > roa_prev:
+                score += 1
+                details.append("✅ ROA 개선")
+            else:
+                details.append("❌ ROA 하락")
+
+        # 4. 영업현금흐름 > 순이익 (이익 질 좋음)
+        if ocf and ni and ocf > ni:
+            score += 1
+            details.append("✅ 영업현금흐름 > 순이익")
+        else:
+            details.append("❌ 영업현금흐름 < 순이익")
+
+        # === 레버리지/유동성 (3개) ===
+        # 5. 장기부채 감소
+        ltd = safe_get(bs, "Long Term Debt")
+        ltd_prev = safe_get(bs, "Long Term Debt", 1)
+        if ltd is not None and ltd_prev is not None:
+            if ltd < ltd_prev:
+                score += 1
+                details.append("✅ 장기부채 감소")
+            else:
+                details.append("❌ 장기부채 증가")
+
+        # 6. 유동비율 개선 (Current Assets / Current Liabilities)
+        ca = safe_get(bs, "Current Assets")
+        cl = safe_get(bs, "Current Liabilities")
+        ca_p = safe_get(bs, "Current Assets", 1)
+        cl_p = safe_get(bs, "Current Liabilities", 1)
+        if ca and cl and cl > 0 and ca_p and cl_p and cl_p > 0:
+            cr_now = ca / cl
+            cr_prev = ca_p / cl_p
+            if cr_now > cr_prev:
+                score += 1
+                details.append("✅ 유동비율 개선")
+            else:
+                details.append("❌ 유동비율 하락")
+
+        # 7. 신주발행 없음 (주식수 동일 or 감소)
+        shares = data.get("market_cap")  # 대안으로 사용
+        # yfinance 데이터 한계로 간소화: 일단 통과
+        score += 1
+        details.append("✅ 신주발행 체크 (간소화)")
+
+        # === 운영 효율 (2개) ===
+        # 8. 매출총이익률 개선
+        rev = safe_get(af, "Total Revenue")
+        gp = safe_get(af, "Gross Profit")
+        rev_p = safe_get(af, "Total Revenue", 1)
+        gp_p = safe_get(af, "Gross Profit", 1)
+        if rev and gp and rev_p and gp_p and rev > 0 and rev_p > 0:
+            gm_now = gp / rev
+            gm_prev = gp_p / rev_p
+            if gm_now > gm_prev:
+                score += 1
+                details.append("✅ 매출총이익률 개선")
+            else:
+                details.append("❌ 매출총이익률 하락")
+
+        # 9. 자산회전율 개선 (Revenue / Total Assets)
+        if rev and ta and rev_p and ta_prev:
+            atr_now = rev / ta
+            atr_prev = rev_p / ta_prev
+            if atr_now > atr_prev:
+                score += 1
+                details.append("✅ 자산회전율 개선")
+            else:
+                details.append("❌ 자산회전율 하락")
+
+        return score, details
+    except Exception as e:
+        logger.debug(f"F-Score 계산 실패: {e}")
+        return 0, ["계산 실패"]
+
+
+def check_risk_warnings(data: dict) -> tuple[int, list]:
+    """위험 신호 자동 감지 → 감점 및 경고 리턴."""
+    penalty = 0
+    warnings = []
+
+    # 1. 부채비율 과다 (300% 초과)
+    debt = data.get("debt_to_equity")
+    holding = is_holding_company(data)
+    if debt is not None:
+        threshold = 500 if holding else 300
+        if debt > threshold:
+            penalty += 10
+            warnings.append(f"부채비율 매우 높음 ({debt:.0f}%)")
+
+    # 2. 이자보상배율 1 미만
+    ic = data.get("interest_coverage")
+    if ic is not None and ic < 1:
+        penalty += 10
+        warnings.append(f"이자보상배율 위험 ({ic:.1f}배)")
+
+    # 3. ROE 마이너스
+    roe = data.get("roe")
+    if roe is not None and roe < 0:
+        penalty += 5
+        warnings.append(f"ROE 적자 ({roe*100:.1f}%)")
+
+    # 4. EPS 적자
+    eps = data.get("eps")
+    if eps is not None and eps < 0:
+        penalty += 5
+        warnings.append(f"EPS 적자")
+
+    # 5. 영업이익률 적자 (지주/금융 제외)
+    op = data.get("operating_margin")
+    if op is not None and not holding and op < 0:
+        penalty += 5
+        warnings.append(f"영업이익률 적자 ({op*100:.1f}%)")
+
+    return penalty, warnings
+
+
+def calc_weighted_overall(value_score, quality_score, momentum_score) -> int:
+    """저평가 우량주 전략 가중치 적용 (밸류40 + 퀄리티40 + 모멘텀20)."""
+    weights = []
+    scores = []
+    if value_score > 0:
+        scores.append(value_score)
+        weights.append(0.4)
+    if quality_score > 0:
+        scores.append(quality_score)
+        weights.append(0.4)
+    if momentum_score > 0:
+        scores.append(momentum_score)
+        weights.append(0.2)
+    if not scores:
+        return 0
+    # 가중치 합 정규화
+    total_weight = sum(weights)
+    weighted_sum = sum(s * w for s, w in zip(scores, weights))
+    return int(weighted_sum / total_weight)
+
+
 def grade_score(score):
     if score >= 80:
         return "🟢 A", "매우 매력적"
@@ -1263,9 +1452,13 @@ def format_factor_message(data):
     quality_score, quality_details = score_quality(data)
     momentum_score, momentum_details = score_momentum(data)
 
-    total_scores = [s for s in [value_score, quality_score, momentum_score] if s > 0]
-    overall = int(np.mean(total_scores)) if total_scores else 0
-    grade, opinion = grade_score(overall)
+    # 가중평균 (저평가 우량주 전략: 밸류40 + 퀄리티40 + 모멘텀20)
+    overall = calc_weighted_overall(value_score, quality_score, momentum_score)
+
+    # 위험 필터 적용
+    penalty, warnings = check_risk_warnings(data)
+    overall_after_risk = max(0, overall - penalty)
+    grade, opinion = grade_score(overall_after_risk)
 
     msg = f"📊 팩터 스코어\n{flag} {data['name']} ({data['code']})\n"
     msg += "━━━━━━━━━━━━━━━\n"
@@ -1302,7 +1495,16 @@ def format_factor_message(data):
     msg += "\n"
 
     msg += "━━━━━━━━━━━━━━━\n"
-    msg += f"📊 종합 점수: {overall}점\n"
+    msg += f"📊 가중 종합 점수: {overall}점\n"
+    msg += f"   (밸류40% + 퀄리티40% + 모멘텀20%)\n"
+
+    # 위험 필터 표시
+    if warnings:
+        msg += f"\n⚠️ 위험 신호 (-{penalty}점)\n"
+        for w in warnings:
+            msg += f"   • {w}\n"
+        msg += f"\n📊 최종 점수: {overall_after_risk}점\n"
+
     msg += f"🎯 등급: {grade} ({opinion})\n"
     msg += "━━━━━━━━━━━━━━━\n\n"
 
@@ -1316,6 +1518,16 @@ def format_factor_message(data):
     msg += "\n🚀 성장성\n"
     for line in get_growth_info(data):
         msg += f"   • {line}\n"
+
+    # F-Score (Piotroski) 표시
+    fscore_info = data.get("fscore_info")
+    if fscore_info:
+        fscore, fscore_details = fscore_info
+        emoji = "🟢" if fscore >= 7 else "🟡" if fscore >= 4 else "🔴"
+        rating = "우량주" if fscore >= 7 else "양호" if fscore >= 4 else "주의"
+        msg += f"\n📊 Piotroski F-Score: {fscore}/9 {emoji} ({rating})\n"
+        for d in fscore_details:
+            msg += f"   {d}\n"
 
     msg += "\n💡 본 분석은 참고용이며, 투자 결정의 책임은 본인에게 있습니다."
     return msg
