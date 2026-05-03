@@ -1703,10 +1703,6 @@ def check_condition(data: dict, cond: dict) -> bool:
     if val is None:
         return False
 
-    # %로 입력하는 지표는 소수점 변환
-    if cond["key"] in ("roe", "roa", "operating_margin", "dividend_yield"):
-        val = val * 100 if val < 1 else val  # 일부는 이미 %일 수 있음
-
     op = cond["op"]
     target = cond["val"]
     if op == "<":
@@ -1730,6 +1726,13 @@ def fetch_stock_quick(item: dict) -> dict | None:
         info = t.info
         if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
             return None
+
+        roe = info.get("returnOnEquity")
+        roa = info.get("returnOnAssets")
+        op_margin = info.get("operatingMargins")
+        div = info.get("dividendYield")
+        rev_growth = info.get("revenueGrowth")
+
         return {
             "code": item["code"],
             "name": item["name"],
@@ -1739,13 +1742,14 @@ def fetch_stock_quick(item: dict) -> dict | None:
             "forward_pe": info.get("forwardPE"),
             "pb_ratio": info.get("priceToBook"),
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
-            "ev_ebitda": None,  # 빠른 처리를 위해 생략
-            "roe": info.get("returnOnEquity"),
-            "roa": info.get("returnOnAssets"),
-            "operating_margin": info.get("operatingMargins"),
+            "ev_ebitda": None,
+            # % 변환해서 저장 (check_condition에서 통일)
+            "roe": roe * 100 if roe and abs(roe) < 10 else roe,
+            "roa": roa * 100 if roa and abs(roa) < 10 else roa,
+            "operating_margin": op_margin * 100 if op_margin and abs(op_margin) < 10 else op_margin,
             "debt_to_equity": info.get("debtToEquity"),
-            "dividend_yield": info.get("dividendYield"),
-            "revenue_growth": info.get("revenueGrowth"),
+            "dividend_yield": div * 100 if div and div < 1 else div,
+            "revenue_growth": rev_growth * 100 if rev_growth and abs(rev_growth) < 10 else rev_growth,
         }
     except Exception:
         return None
@@ -1889,7 +1893,14 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             if not matches:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"❌ 조건에 맞는 종목이 없어요.\n조건: {cond_summary}"
+                    text=(
+                        f"❌ 조건에 맞는 종목이 없어요.\n"
+                        f"조건: {cond_summary}\n\n"
+                        f"💡 가능한 원인:\n"
+                        f"• 조건이 너무 엄격해요 (조건 완화 시도)\n"
+                        f"• FORWARDPER 등 일부 지표는 한국 주식에 데이터가 없을 수 있어요\n"
+                        f"• PER/PBR 등 기본 지표로 먼저 시도해보세요"
+                    )
                 )
                 return
 
