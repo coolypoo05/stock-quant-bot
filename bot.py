@@ -1564,6 +1564,157 @@ def process_factor(query):
 
 
 # ============================================================
+# 스크리닝 (종목 검색)
+# ============================================================
+
+SCREENING_UNIVERSE = []  # [{"code", "name", "suffix", "market"}]
+
+
+def load_screening_universe():
+    """코스피200 + 코스닥150 + S&P500 로딩."""
+    global SCREENING_UNIVERSE
+    SCREENING_UNIVERSE = []
+    logger.info("스크리닝 유니버스 로딩 중...")
+
+    # 1. 코스피200, 코스닥150 (KRX에서)
+    try:
+        for index_code, market_label, suffix in [
+            ("1028", "KOSPI200", ".KS"),  # 코스피200
+            ("2203", "KOSDAQ150", ".KQ"),  # 코스닥150
+        ]:
+            url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+            payload = {
+                "bld": "dbms/MDC/STAT/standard/MDCSTAT00601",
+                "indIdx": "1" if "KOSPI" in market_label else "2",
+                "indIdx2": index_code,
+                "trdDd": datetime.now().strftime("%Y%m%d"),
+                "money": "1",
+                "csvxls_isNo": "false",
+            }
+            try:
+                res = requests.post(url, data=payload, headers=HEADERS, timeout=15)
+                data = res.json()
+                if "output" in data:
+                    for row in data["output"]:
+                        SCREENING_UNIVERSE.append({
+                            "code": row.get("ISU_SRT_CD", "").zfill(6),
+                            "name": row.get("ISU_ABBRV", ""),
+                            "suffix": suffix,
+                            "market": market_label,
+                        })
+            except Exception as e:
+                logger.warning(f"{market_label} 로딩 실패: {e}")
+    except Exception as e:
+        logger.error(f"한국 인덱스 로딩 실패: {e}")
+
+    # 2. S&P500 (Wikipedia에서)
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        df = pd.read_html(io.StringIO(res.text))[0]
+        for _, row in df.iterrows():
+            symbol = str(row.get("Symbol", "")).replace(".", "-")
+            name = row.get("Security", "")
+            if symbol:
+                SCREENING_UNIVERSE.append({
+                    "code": symbol,
+                    "name": name,
+                    "suffix": "",
+                    "market": "SP500",
+                })
+    except Exception as e:
+        logger.error(f"S&P500 로딩 실패: {e}")
+
+    logger.info(f"스크리닝 유니버스 로딩 완료: {len(SCREENING_UNIVERSE)}개")
+
+
+def parse_screen_conditions(text: str) -> list:
+    """'PER<10 ROE>15' 같은 조건 파싱."""
+    conditions = []
+    # 지원 지표 매핑
+    metric_map = {
+        "PER": "pe_ratio",
+        "FORWARDPER": "forward_pe",
+        "PBR": "pb_ratio",
+        "PSR": "ps_ratio",
+        "EVEBITDA": "ev_ebitda",
+        "ROE": "roe",  # %
+        "ROA": "roa",  # %
+        "OPMARGIN": "operating_margin",  # %
+        "DEBT": "debt_to_equity",
+        "DIV": "dividend_yield",  # %
+        "REVGROWTH": "revenue_growth",
+    }
+    pattern = re.compile(r"([A-Z]+)\s*(<=|>=|<|>|=)\s*(-?[\d.]+)", re.IGNORECASE)
+    for m in pattern.finditer(text):
+        metric = m.group(1).upper().replace("/", "")
+        op = m.group(2)
+        val = float(m.group(3))
+        if metric in metric_map:
+            conditions.append({
+                "key": metric_map[metric],
+                "op": op,
+                "val": val,
+                "raw": metric,
+            })
+    return conditions
+
+
+def check_condition(data: dict, cond: dict) -> bool:
+    """조건 1개 체크."""
+    val = data.get(cond["key"])
+    if val is None:
+        return False
+
+    # %로 입력하는 지표는 소수점 변환
+    if cond["key"] in ("roe", "roa", "operating_margin", "dividend_yield"):
+        val = val * 100 if val < 1 else val  # 일부는 이미 %일 수 있음
+
+    op = cond["op"]
+    target = cond["val"]
+    if op == "<":
+        return val < target
+    elif op == "<=":
+        return val <= target
+    elif op == ">":
+        return val > target
+    elif op == ">=":
+        return val >= target
+    elif op == "=":
+        return abs(val - target) < 0.01
+    return False
+
+
+def fetch_stock_quick(item: dict) -> dict | None:
+    """스크리닝용 빠른 데이터 수집 (yfinance만 사용)."""
+    try:
+        ticker_str = item["code"] + item["suffix"]
+        t = yf.Ticker(ticker_str)
+        info = t.info
+        if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
+            return None
+        return {
+            "code": item["code"],
+            "name": item["name"],
+            "market": item["market"],
+            "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            "pe_ratio": info.get("trailingPE"),
+            "forward_pe": info.get("forwardPE"),
+            "pb_ratio": info.get("priceToBook"),
+            "ps_ratio": info.get("priceToSalesTrailing12Months"),
+            "ev_ebitda": None,  # 빠른 처리를 위해 생략
+            "roe": info.get("returnOnEquity"),
+            "roa": info.get("returnOnAssets"),
+            "operating_margin": info.get("operatingMargins"),
+            "debt_to_equity": info.get("debtToEquity"),
+            "dividend_yield": info.get("dividendYield"),
+            "revenue_growth": info.get("revenueGrowth"),
+        }
+    except Exception:
+        return None
+
+
+# ============================================================
 # 텔레그램 핸들러
 # ============================================================
 
@@ -1592,14 +1743,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  예) /factor 삼성전자\n"
         "      /factor 005930\n"
         "      /factor AAPL\n\n"
+        "🔍 스크리닝:\n"
+        "  /screen PER<10 ROE>15\n"
+        "  /screen DIV>3 DEBT<100\n"
+        "  /screen 만 입력하면 도움말\n\n"
         "또는 종목명/티커만 입력해도 자동 분석합니다.\n\n"
         "⚙️ 점수 산출 방식:\n"
-        "  • 밸류, 퀄리티, 모멘텀 3개 팩터\n"
-        "  • 각각 0~100점 → 평균 = 종합점수\n"
-        "  • 등급: A(80+), B+(70+), B(60+)\n\n"
+        "  • 밸류40 + 퀄리티40 + 모멘텀20\n"
+        "  • 위험 신호 자동 감점\n"
+        "  • Piotroski F-Score 별도 표시\n\n"
         "📌 참고 정보 (점수 X):\n"
-        "  • 배당 정보\n"
-        "  • 변동성 정보"
+        "  • 배당 / 변동성 / 성장성"
     )
 
 
@@ -1620,6 +1774,135 @@ async def factor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"⚠️ 오류: {e}")
 
 
+async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """스크리닝 명령어. 예: /screen PER<10 ROE>15"""
+    if not context.args:
+        await update.message.reply_text(
+            "📋 사용법:\n"
+            "/screen PER<10 ROE>15\n\n"
+            "지원 지표:\n"
+            "• PER, FORWARDPER, PBR, PSR\n"
+            "• ROE, ROA (%)\n"
+            "• OPMARGIN (영업이익률 %)\n"
+            "• DEBT (부채비율 %)\n"
+            "• DIV (배당수익률 %)\n"
+            "• REVGROWTH (매출성장률 %)\n\n"
+            "연산자: <, <=, >, >=, =\n\n"
+            "예시:\n"
+            "  /screen PER<10 ROE>15\n"
+            "  /screen DIV>3 DEBT<100\n"
+            "  /screen PBR<1 ROE>10"
+        )
+        return
+
+    text = " ".join(context.args)
+    conditions = parse_screen_conditions(text)
+
+    if not conditions:
+        await update.message.reply_text(
+            "❌ 조건을 인식할 수 없어요.\n"
+            "예) /screen PER<10 ROE>15\n"
+            "/screen 만 입력하면 도움말이 나와요."
+        )
+        return
+
+    # 조건 요약
+    cond_summary = ", ".join([f"{c['raw']}{c['op']}{c['val']}" for c in conditions])
+
+    if not SCREENING_UNIVERSE:
+        await update.message.reply_text("⚠️ 종목 리스트가 아직 로딩되지 않았어요. 잠시 후 다시 시도하세요.")
+        return
+
+    total = len(SCREENING_UNIVERSE)
+    await update.message.reply_text(
+        f"🔍 스크리닝 시작!\n"
+        f"조건: {cond_summary}\n"
+        f"검색 범위: {total}개 종목 (코스피200+코스닥150+S&P500)\n"
+        f"⏳ 약 10~15분 소요됩니다. 완료 시 자동 알림드려요."
+    )
+
+    chat_id = update.effective_chat.id
+
+    # 비동기 백그라운드 실행
+    async def run_screening():
+        try:
+            matches = []
+            processed = 0
+            last_progress = 0
+
+            for item in SCREENING_UNIVERSE:
+                processed += 1
+                data = fetch_stock_quick(item)
+                if data:
+                    if all(check_condition(data, c) for c in conditions):
+                        matches.append(data)
+
+                # 100개마다 진행 상황 알림
+                if processed - last_progress >= 100:
+                    last_progress = processed
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⏳ 진행 중... {processed}/{total} ({len(matches)}개 매칭)"
+                        )
+                    except Exception:
+                        pass
+
+            # 결과 메시지
+            if not matches:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ 조건에 맞는 종목이 없어요.\n조건: {cond_summary}"
+                )
+                return
+
+            # 결과 정렬: ROE 높은 순 (없으면 PER 낮은 순)
+            matches.sort(key=lambda x: -(x.get("roe") or 0))
+
+            msg = f"✅ 스크리닝 완료!\n조건: {cond_summary}\n매칭: {len(matches)}개\n"
+            msg += "━━━━━━━━━━━━━━━\n\n"
+
+            # 최대 30개까지 표시
+            for i, m in enumerate(matches[:30], 1):
+                flag = "🇰🇷" if m["market"] != "SP500" else "🇺🇸"
+                msg += f"{i}. {flag} {m['name']} ({m['code']})\n"
+
+                # 주요 지표 요약
+                parts = []
+                if m.get("pe_ratio") and m["pe_ratio"] > 0:
+                    parts.append(f"PER {m['pe_ratio']:.1f}")
+                if m.get("pb_ratio") and m["pb_ratio"] > 0:
+                    parts.append(f"PBR {m['pb_ratio']:.1f}")
+                if m.get("roe") is not None:
+                    parts.append(f"ROE {m['roe']*100:.1f}%")
+                if m.get("dividend_yield"):
+                    div_pct = m["dividend_yield"] * 100 if m["dividend_yield"] < 1 else m["dividend_yield"]
+                    parts.append(f"DIV {div_pct:.1f}%")
+                if parts:
+                    msg += "   " + " | ".join(parts) + "\n"
+
+            if len(matches) > 30:
+                msg += f"\n... 외 {len(matches)-30}개 더\n"
+
+            msg += "\n💡 자세한 분석은 /factor <종목명>"
+
+            # 메시지 길이 제한 (4096자)
+            if len(msg) > 4000:
+                msg = msg[:3950] + "\n\n... (메시지 길이 초과로 일부 생략)"
+
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+        except Exception as e:
+            logger.exception("스크리닝 실패")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ 스크리닝 중 오류: {e}"
+            )
+
+    # 백그라운드 태스크로 실행
+    import asyncio
+    asyncio.create_task(run_screening())
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.message.text.strip()
     logger.info(f"조회 요청: {query}")
@@ -1638,10 +1921,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 def main() -> None:
     load_stock_map()
+    load_screening_universe()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("factor", factor_cmd))
+    app.add_handler(CommandHandler("screen", screen_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("퀀트 봇 시작...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
