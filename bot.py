@@ -55,10 +55,10 @@ def load_stock_map():
     global STOCK_MAP
     logger.info("한국 종목 리스트 로딩 중...")
     try:
-        # 코스피
-        for market, suffix in [("kospi", ".KS"), ("kosdaq", ".KQ")]:
+        # 코스피/코스닥 각각 로딩
+        for market_type, suffix in [("stockMkt", ".KS"), ("kosdaqMkt", ".KQ")]:
             url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
-            params = {"method": "download", "searchType": "13", "marketType": market}
+            params = {"method": "download", "searchType": "13", "marketType": market_type}
             res = requests.get(url, params=params, headers=HEADERS, timeout=30)
             res.raise_for_status()
             df = pd.read_html(io.StringIO(res.text))[0]
