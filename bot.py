@@ -400,6 +400,7 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
         ev_ebitda = calc_ev_ebitda(t_obj, info) if t_obj else None
         interest_coverage = calc_interest_coverage(t_obj) if t_obj else None
         revenue_growth = calc_revenue_growth(t_obj) if t_obj else None
+        dividend_growth = calc_dividend_growth(t_obj) if t_obj else {}
 
         # PER, PBR: yfinance → None이면 네이버 fallback
         pe_ratio = info.get("trailingPE")
@@ -445,6 +446,7 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             "revenue_growth": revenue_growth,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
+            "dividend_growth": dividend_growth,
             "beta": info.get("beta"),
             "sector": info.get("sector", ""),
             "industry": info.get("industry", ""),
@@ -472,6 +474,7 @@ def get_us_stock_data(ticker: str):
         ev_ebitda = calc_ev_ebitda(t, info)
         interest_coverage = calc_interest_coverage(t)
         revenue_growth = calc_revenue_growth(t)
+        dividend_growth = calc_dividend_growth(t)
 
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
@@ -494,6 +497,7 @@ def get_us_stock_data(ticker: str):
             "revenue_growth": revenue_growth,
             "dividend_yield": info.get("dividendYield"),
             "payout_ratio": info.get("payoutRatio"),
+            "dividend_growth": dividend_growth,
             "beta": info.get("beta"),
             "sector": info.get("sector", ""),
             "industry": info.get("industry", ""),
@@ -693,7 +697,7 @@ def score_value(data):
         scores.append(s)
         details.append(f"EV/EBITDA: {ev_ebitda:.2f}배 ({g})")
 
-    # PEG (PER / EPS성장률, 1.0 이하면 성장 대비 저평가)
+    # PEG (PER / EPS성장률, 1.0 이하면 성장 대비 저평가) - 가중치 2배
     pe = data.get("pe_ratio")
     if pe and pe > 0 and eps_growth and eps_growth > 0:
         peg = pe / eps_growth
@@ -708,7 +712,8 @@ def score_value(data):
         else:
             s, g = 20, "고평가"
         scores.append(s)
-        details.append(f"PEG: {peg:.2f} ({g})")
+        scores.append(s)  # 가중치 2배 (성장 감안한 밸류 중요도 상향)
+        details.append(f"PEG: {peg:.2f} ({g}) ★★")
     elif pe and pe > 0 and eps_growth and eps_growth <= 0:
         details.append(f"PEG: 산출불가 (EPS 감소 중)")
 
@@ -829,25 +834,6 @@ def score_quality(data):
             s, g = 10, "위험 ⚠️"
         scores.append(s)
         details.append(f"이자보상배율: {ic:.1f}배 ({g})")
-
-    # 매출 성장률 (YoY)
-    rev_growth = data.get("revenue_growth")
-    if rev_growth is not None:
-        sign = "+" if rev_growth >= 0 else ""
-        if rev_growth > 20:
-            s, g = 95, "고성장"
-        elif rev_growth > 10:
-            s, g = 80, "성장"
-        elif rev_growth > 3:
-            s, g = 65, "완만한 성장"
-        elif rev_growth > -3:
-            s, g = 50, "보합"
-        elif rev_growth > -10:
-            s, g = 30, "역성장"
-        else:
-            s, g = 15, "급감"
-        scores.append(s)
-        details.append(f"매출 성장률: {sign}{rev_growth:.1f}% ({g})")
 
     if not scores:
         return 0, ["데이터 부족"]
@@ -1061,6 +1047,52 @@ def score_momentum(data):
 # 참고 정보 (점수화 X)
 # ============================================================
 
+def calc_dividend_growth(t_obj) -> dict:
+    """최근 3년 배당 성장률 계산."""
+    result = {"growth_rates": [], "cagr": None, "consecutive_growth": 0}
+    try:
+        divs = t_obj.dividends
+        if divs is None or divs.empty:
+            return result
+
+        # 연도별 배당 합산
+        divs.index = divs.index.tz_localize(None) if divs.index.tz else divs.index
+        annual = divs.groupby(divs.index.year).sum()
+
+        if len(annual) < 2:
+            return result
+
+        # 최근 4년치만 사용 (3년간 성장률 계산)
+        annual = annual.iloc[-4:]
+        years = list(annual.index)
+        amounts = list(annual.values)
+
+        # 연도별 성장률
+        for i in range(1, len(amounts)):
+            if amounts[i-1] > 0:
+                rate = ((amounts[i] - amounts[i-1]) / amounts[i-1]) * 100
+                result["growth_rates"].append((years[i], rate))
+
+        # CAGR (연평균 성장률)
+        if len(amounts) >= 2 and amounts[0] > 0:
+            n = len(amounts) - 1
+            result["cagr"] = ((amounts[-1] / amounts[0]) ** (1 / n) - 1) * 100
+
+        # 연속 성장 횟수
+        consecutive = 0
+        for _, rate in reversed(result["growth_rates"]):
+            if rate > 0:
+                consecutive += 1
+            else:
+                break
+        result["consecutive_growth"] = consecutive
+
+        return result
+    except Exception as e:
+        logger.debug(f"배당 성장률 계산 실패: {e}")
+        return result
+
+
 def get_dividend_info(data):
     lines = []
     div = data.get("dividend_yield")
@@ -1073,6 +1105,29 @@ def get_dividend_info(data):
     payout = data.get("payout_ratio")
     if payout:
         lines.append(f"배당성향: {payout*100:.1f}%")
+
+    # 배당 성장률
+    div_growth = data.get("dividend_growth", {})
+    growth_rates = div_growth.get("growth_rates", [])
+    cagr = div_growth.get("cagr")
+    consecutive = div_growth.get("consecutive_growth", 0)
+
+    if growth_rates:
+        lines.append("배당 성장률 (연도별):")
+        for year, rate in growth_rates:
+            sign = "+" if rate >= 0 else ""
+            emoji = "📈" if rate > 0 else "📉"
+            lines.append(f"  {emoji} {year}년: {sign}{rate:.1f}%")
+        if cagr is not None:
+            sign = "+" if cagr >= 0 else ""
+            lines.append(f"배당 CAGR: {sign}{cagr:.1f}%")
+        if consecutive >= 3:
+            lines.append(f"연속 배당 증가: {consecutive}년 ★")
+        elif consecutive > 0:
+            lines.append(f"연속 배당 증가: {consecutive}년")
+    elif div:
+        lines.append("배당 성장률: 히스토리 부족")
+
     return lines
 
 
@@ -1097,6 +1152,60 @@ def get_volatility_info(data):
         daily_returns = hist["Close"].pct_change().dropna()
         annual_vol = daily_returns.std() * np.sqrt(252) * 100
         lines.append(f"연환산 변동성: {annual_vol:.2f}%")
+
+    if not lines:
+        lines.append("데이터 부족")
+    return lines
+
+
+def get_growth_info(data) -> list:
+    """성장성 정보 (참고용, 점수화 X)."""
+    lines = []
+
+    # 매출 성장률
+    rev_growth = data.get("revenue_growth")
+    if rev_growth is not None:
+        sign = "+" if rev_growth >= 0 else ""
+        if rev_growth > 20:
+            g = "고성장 🚀"
+        elif rev_growth > 10:
+            g = "성장"
+        elif rev_growth > 3:
+            g = "완만한 성장"
+        elif rev_growth > -3:
+            g = "보합"
+        elif rev_growth > -10:
+            g = "역성장"
+        else:
+            g = "급감 ⚠️"
+        lines.append(f"매출 성장률 (YoY): {sign}{rev_growth:.1f}% ({g})")
+    else:
+        lines.append("매출 성장률: 데이터 없음")
+
+    # EPS 성장률
+    eps = data.get("eps")
+    feps = data.get("forward_eps")
+    if eps and feps and eps > 0 and feps > 0:
+        eps_growth = ((feps - eps) / abs(eps)) * 100
+        sign = "+" if eps_growth >= 0 else ""
+        if eps_growth > 30:
+            g = "고성장 🚀"
+        elif eps_growth > 15:
+            g = "성장"
+        elif eps_growth > 5:
+            g = "완만한 성장"
+        elif eps_growth > -5:
+            g = "보합"
+        else:
+            g = "감익 ⚠️"
+        lines.append(f"EPS 성장률 (예상): {sign}{eps_growth:.1f}% ({g})")
+    elif eps:
+        lines.append("EPS 성장률: Forward EPS 데이터 없음")
+
+    # Forward PER (성장주 체크용)
+    fpe = data.get("forward_pe")
+    if fpe and fpe > 0:
+        lines.append(f"Forward PER: {fpe:.2f}배")
 
     if not lines:
         lines.append("데이터 부족")
@@ -1180,6 +1289,9 @@ def format_factor_message(data):
         msg += f"   • {line}\n"
     msg += "\n📉 변동성\n"
     for line in get_volatility_info(data):
+        msg += f"   • {line}\n"
+    msg += "\n🚀 성장성\n"
+    for line in get_growth_info(data):
         msg += f"   • {line}\n"
 
     msg += "\n💡 본 분석은 참고용이며, 투자 결정의 책임은 본인에게 있습니다."
