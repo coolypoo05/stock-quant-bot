@@ -1055,8 +1055,10 @@ def calc_dividend_growth(t_obj) -> dict:
         if divs is None or divs.empty:
             return result
 
-        # 연도별 배당 합산
+        # 연도별 배당 합산 (현재 연도 제외 - 아직 완전하지 않음)
         divs.index = divs.index.tz_localize(None) if divs.index.tz else divs.index
+        current_year = datetime.now().year
+        divs = divs[divs.index.year < current_year]
         annual = divs.groupby(divs.index.year).sum()
 
         if len(annual) < 2:
