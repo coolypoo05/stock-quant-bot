@@ -1571,85 +1571,94 @@ SCREENING_UNIVERSE = []  # [{"code", "name", "suffix", "market"}]
 
 
 def load_screening_universe():
-    """코스피200 + 코스닥150 + S&P500 로딩."""
+    """코스피200 + 코스닥150(대형주) + S&P500 로딩."""
     global SCREENING_UNIVERSE
     SCREENING_UNIVERSE = []
     logger.info("스크리닝 유니버스 로딩 중...")
 
-    # 1. 코스피200 / 코스닥150 (Wikipedia)
-    for index_name, suffix, market_label in [
-        ("KOSPI_200", ".KS", "KOSPI200"),
-        ("KOSDAQ_150", ".KQ", "KOSDAQ150"),
-    ]:
-        try:
-            url = f"https://en.wikipedia.org/wiki/{index_name}"
-            res = requests.get(url, headers=HEADERS, timeout=15)
-            tables = pd.read_html(io.StringIO(res.text))
-
-            # 종목 코드를 포함하는 테이블 찾기
-            for df in tables:
-                # 컬럼 이름 확인
-                cols_lower = [str(c).lower() for c in df.columns]
-                code_col = None
-                name_col = None
-                for c in df.columns:
-                    c_str = str(c).lower()
-                    if "ticker" in c_str or "code" in c_str or "symbol" in c_str:
-                        code_col = c
-                    elif "name" in c_str or "company" in c_str:
-                        name_col = c
-
-                if code_col is None:
+    # 1. 코스피200 (Wikipedia)
+    try:
+        url = "https://en.wikipedia.org/wiki/KOSPI_200"
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        tables = pd.read_html(io.StringIO(res.text))
+        for df in tables:
+            code_col = None
+            name_col = None
+            for c in df.columns:
+                c_str = str(c).lower()
+                if any(k in c_str for k in ["ticker", "code", "symbol"]):
+                    code_col = c
+                elif any(k in c_str for k in ["name", "company"]):
+                    name_col = c
+            if code_col is None:
+                continue
+            count = 0
+            for _, row in df.iterrows():
+                code_clean = re.sub(r"\D", "", str(row[code_col])).zfill(6)[-6:]
+                if not re.fullmatch(r"\d{6}", code_clean):
                     continue
+                name = str(row[name_col]).strip() if name_col else code_clean
+                SCREENING_UNIVERSE.append({
+                    "code": code_clean, "name": name,
+                    "suffix": ".KS", "market": "KOSPI200",
+                })
+                count += 1
+            if count > 0:
+                logger.info(f"KOSPI200 로딩: {count}개")
+                break
+    except Exception as e:
+        logger.warning(f"KOSPI200 로딩 실패: {e}")
 
-                count_added = 0
-                for _, row in df.iterrows():
-                    code = str(row[code_col]).strip()
-                    # 6자리 숫자만 유효
-                    code_clean = re.sub(r"\D", "", code).zfill(6)[-6:]
-                    if not re.fullmatch(r"\d{6}", code_clean):
-                        continue
-                    name = str(row[name_col]).strip() if name_col else code_clean
-                    SCREENING_UNIVERSE.append({
-                        "code": code_clean,
-                        "name": name,
-                        "suffix": suffix,
-                        "market": market_label,
-                    })
-                    count_added += 1
-
-                if count_added > 0:
-                    logger.info(f"{market_label} 로딩: {count_added}개")
+    # 2. 코스닥150: 네이버 금융에서 시가총액 상위 150개 조회 (빠름)
+    try:
+        kosdaq_top = []
+        for page in range(1, 5):  # 페이지당 50개 × 4 = 200개에서 150개 선택
+            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=1&page={page}"
+            res = requests.get(url, headers=HEADERS, timeout=15)
+            res.encoding = "euc-kr"
+            soup = BeautifulSoup(res.text, "html.parser")
+            rows = soup.select("table.type_2 tbody tr")
+            for row in rows:
+                link = row.select_one("a.tltle")
+                if not link:
+                    continue
+                name = link.get_text(strip=True)
+                href = link.get("href", "")
+                code_match = re.search(r"code=(\d{6})", href)
+                if not code_match:
+                    continue
+                code = code_match.group(1)
+                kosdaq_top.append({"code": code, "name": name})
+                if len(kosdaq_top) >= 150:
                     break
-        except Exception as e:
-            logger.warning(f"{market_label} 로딩 실패: {e}")
+            if len(kosdaq_top) >= 150:
+                break
 
-    # 폴백: 위키 실패 시 STOCK_MAP에서 KOSPI 종목 일부 가져오기
-    if len([s for s in SCREENING_UNIVERSE if s["market"] in ("KOSPI200", "KOSDAQ150")]) == 0:
-        logger.info("Wikipedia 실패 → STOCK_MAP에서 한국 종목 전체 사용")
-        for name, info in STOCK_MAP.items():
+        for item in kosdaq_top:
             SCREENING_UNIVERSE.append({
-                "code": info["code"],
-                "name": name,
-                "suffix": info["suffix"],
-                "market": "KR_ALL",
+                "code": item["code"], "name": item["name"],
+                "suffix": ".KQ", "market": "KOSDAQ150",
             })
+        logger.info(f"KOSDAQ150 로딩: {len(kosdaq_top)}개 (네이버 시가총액 상위)")
+    except Exception as e:
+        logger.warning(f"KOSDAQ150 로딩 실패: {e}")
 
-    # 2. S&P500 (Wikipedia에서)
+    # 3. S&P500 (Wikipedia)
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
         res = requests.get(url, headers=HEADERS, timeout=15)
         df = pd.read_html(io.StringIO(res.text))[0]
+        count = 0
         for _, row in df.iterrows():
             symbol = str(row.get("Symbol", "")).replace(".", "-")
             name = row.get("Security", "")
-            if symbol:
+            if symbol and symbol != "nan":
                 SCREENING_UNIVERSE.append({
-                    "code": symbol,
-                    "name": name,
-                    "suffix": "",
-                    "market": "SP500",
+                    "code": symbol, "name": name,
+                    "suffix": "", "market": "SP500",
                 })
+                count += 1
+        logger.info(f"S&P500 로딩: {count}개")
     except Exception as e:
         logger.error(f"S&P500 로딩 실패: {e}")
 
