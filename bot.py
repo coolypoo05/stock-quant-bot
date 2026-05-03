@@ -964,6 +964,94 @@ def score_momentum(data):
                 details.append(f"   • 거래량 감소 (관심 하락)")
             scores.append(s)
 
+    # 5) 이동평균선 정배열 (MA20, MA60, MA120)
+    if len(hist) >= 120:
+        ma20 = hist["Close"].rolling(20).mean().iloc[-1]
+        ma60 = hist["Close"].rolling(60).mean().iloc[-1]
+        ma120 = hist["Close"].rolling(120).mean().iloc[-1]
+        details.append(f"\n📊 이동평균선")
+        details.append(f"   • MA20: {ma20:,.0f} | MA60: {ma60:,.0f} | MA120: {ma120:,.0f}")
+
+        # 정배열: MA20 > MA60 > MA120 (강한 상승 추세)
+        # 역배열: MA20 < MA60 < MA120 (강한 하락 추세)
+        if ma20 > ma60 > ma120 and current > ma20:
+            s = 90
+            details.append(f"   • 완전 정배열 (강한 상승 추세) ★")
+        elif ma20 > ma60 > ma120:
+            s = 75
+            details.append(f"   • 정배열 (상승 추세)")
+        elif ma20 > ma60 and current > ma20:
+            s = 65
+            details.append(f"   • 단기 상승 추세")
+        elif ma20 < ma60 < ma120 and current < ma20:
+            s = 15
+            details.append(f"   • 완전 역배열 (강한 하락 추세) ⚠️")
+        elif ma20 < ma60 < ma120:
+            s = 25
+            details.append(f"   • 역배열 (하락 추세)")
+        elif ma20 < ma60 and current < ma20:
+            s = 35
+            details.append(f"   • 단기 하락 추세")
+        else:
+            s = 50
+            details.append(f"   • 혼조 (방향성 불분명)")
+        scores.append(s)
+    elif len(hist) >= 60:
+        # 데이터 부족 시 MA20, MA60만으로 판단
+        ma20 = hist["Close"].rolling(20).mean().iloc[-1]
+        ma60 = hist["Close"].rolling(60).mean().iloc[-1]
+        details.append(f"\n📊 이동평균선 (단기)")
+        details.append(f"   • MA20: {ma20:,.0f} | MA60: {ma60:,.0f}")
+        if ma20 > ma60 and current > ma20:
+            s = 75
+            details.append(f"   • 단기 정배열 (상승 추세)")
+        elif ma20 < ma60 and current < ma20:
+            s = 25
+            details.append(f"   • 단기 역배열 (하락 추세)")
+        else:
+            s = 50
+            details.append(f"   • 혼조")
+        scores.append(s)
+
+    # 6) MACD (단기/장기 EMA 차이로 추세 전환 포착)
+    if len(hist) >= 35:
+        # MACD = EMA(12) - EMA(26), Signal = MACD의 EMA(9)
+        ema12 = hist["Close"].ewm(span=12, adjust=False).mean()
+        ema26 = hist["Close"].ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        histogram = macd_line - signal_line
+
+        macd_now = macd_line.iloc[-1]
+        signal_now = signal_line.iloc[-1]
+        hist_now = histogram.iloc[-1]
+        hist_prev = histogram.iloc[-2] if len(histogram) >= 2 else 0
+
+        details.append(f"\n📈 MACD")
+        details.append(f"   • MACD: {macd_now:,.1f} | Signal: {signal_now:,.1f}")
+
+        # 골든크로스: 히스토그램이 음수 → 양수 전환
+        # 데드크로스: 히스토그램이 양수 → 음수 전환
+        if hist_prev < 0 and hist_now >= 0:
+            s = 90
+            details.append(f"   • 골든크로스 발생! (강한 매수 신호) ★")
+        elif hist_prev >= 0 and hist_now < 0:
+            s = 15
+            details.append(f"   • 데드크로스 발생 (매도 신호) ⚠️")
+        elif macd_now > signal_now and hist_now > hist_prev:
+            s = 80
+            details.append(f"   • MACD > Signal 상승세 (강세 지속)")
+        elif macd_now > signal_now:
+            s = 65
+            details.append(f"   • MACD > Signal (상승 추세)")
+        elif macd_now < signal_now and hist_now < hist_prev:
+            s = 25
+            details.append(f"   • MACD < Signal 하락세 (약세 지속)")
+        else:
+            s = 40
+            details.append(f"   • MACD < Signal (하락 추세)")
+        scores.append(s)
+
     if not scores:
         return 0, ["데이터 부족"]
     return int(np.mean(scores)), details
