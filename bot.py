@@ -1576,36 +1576,64 @@ def load_screening_universe():
     SCREENING_UNIVERSE = []
     logger.info("스크리닝 유니버스 로딩 중...")
 
-    # 1. 코스피200, 코스닥150 (KRX에서)
-    try:
-        for index_code, market_label, suffix in [
-            ("1028", "KOSPI200", ".KS"),  # 코스피200
-            ("2203", "KOSDAQ150", ".KQ"),  # 코스닥150
-        ]:
-            url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-            payload = {
-                "bld": "dbms/MDC/STAT/standard/MDCSTAT00601",
-                "indIdx": "1" if "KOSPI" in market_label else "2",
-                "indIdx2": index_code,
-                "trdDd": datetime.now().strftime("%Y%m%d"),
-                "money": "1",
-                "csvxls_isNo": "false",
-            }
-            try:
-                res = requests.post(url, data=payload, headers=HEADERS, timeout=15)
-                data = res.json()
-                if "output" in data:
-                    for row in data["output"]:
-                        SCREENING_UNIVERSE.append({
-                            "code": row.get("ISU_SRT_CD", "").zfill(6),
-                            "name": row.get("ISU_ABBRV", ""),
-                            "suffix": suffix,
-                            "market": market_label,
-                        })
-            except Exception as e:
-                logger.warning(f"{market_label} 로딩 실패: {e}")
-    except Exception as e:
-        logger.error(f"한국 인덱스 로딩 실패: {e}")
+    # 1. 코스피200 / 코스닥150 (Wikipedia)
+    for index_name, suffix, market_label in [
+        ("KOSPI_200", ".KS", "KOSPI200"),
+        ("KOSDAQ_150", ".KQ", "KOSDAQ150"),
+    ]:
+        try:
+            url = f"https://en.wikipedia.org/wiki/{index_name}"
+            res = requests.get(url, headers=HEADERS, timeout=15)
+            tables = pd.read_html(io.StringIO(res.text))
+
+            # 종목 코드를 포함하는 테이블 찾기
+            for df in tables:
+                # 컬럼 이름 확인
+                cols_lower = [str(c).lower() for c in df.columns]
+                code_col = None
+                name_col = None
+                for c in df.columns:
+                    c_str = str(c).lower()
+                    if "ticker" in c_str or "code" in c_str or "symbol" in c_str:
+                        code_col = c
+                    elif "name" in c_str or "company" in c_str:
+                        name_col = c
+
+                if code_col is None:
+                    continue
+
+                count_added = 0
+                for _, row in df.iterrows():
+                    code = str(row[code_col]).strip()
+                    # 6자리 숫자만 유효
+                    code_clean = re.sub(r"\D", "", code).zfill(6)[-6:]
+                    if not re.fullmatch(r"\d{6}", code_clean):
+                        continue
+                    name = str(row[name_col]).strip() if name_col else code_clean
+                    SCREENING_UNIVERSE.append({
+                        "code": code_clean,
+                        "name": name,
+                        "suffix": suffix,
+                        "market": market_label,
+                    })
+                    count_added += 1
+
+                if count_added > 0:
+                    logger.info(f"{market_label} 로딩: {count_added}개")
+                    break
+        except Exception as e:
+            logger.warning(f"{market_label} 로딩 실패: {e}")
+
+    # 폴백: 위키 실패 시 STOCK_MAP에서 KOSPI 종목 일부 가져오기
+    if len([s for s in SCREENING_UNIVERSE if s["market"] in ("KOSPI200", "KOSDAQ150")]) == 0:
+        logger.info("Wikipedia 실패 → STOCK_MAP에서 한국 종목 전체 사용")
+        for name, info in STOCK_MAP.items():
+            SCREENING_UNIVERSE.append({
+                "code": info["code"],
+                "name": name,
+                "suffix": info["suffix"],
+                "market": "KR_ALL",
+            })
 
     # 2. S&P500 (Wikipedia에서)
     try:
