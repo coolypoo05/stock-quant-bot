@@ -1305,6 +1305,15 @@ def format_factor_message(data):
 # ============================================================
 
 def process_factor(query):
+    query = query.strip()
+
+    # 영문자만으로 구성된 경우 → 미국 주식 먼저 시도
+    if re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
+        data = get_us_stock_data(query.upper())
+        if data:
+            return format_factor_message(data)
+
+    # 한국 주식 시도 (종목명/6자리 코드)
     result = search_kor_stock(query)
     if result:
         code, name, suffix = result
@@ -1312,7 +1321,8 @@ def process_factor(query):
         if data:
             return format_factor_message(data)
 
-    if re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
+    # 미국 주식 재시도 (한국에서 못 찾은 경우)
+    if not re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
         data = get_us_stock_data(query.upper())
         if data:
             return format_factor_message(data)
