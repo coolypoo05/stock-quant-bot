@@ -7,6 +7,8 @@
 import os
 import re
 import io
+import gc
+import asyncio
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -1867,6 +1869,8 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # 비동기 백그라운드 실행
     async def run_screening():
         try:
+            import asyncio
+            import gc
             matches = []
             processed = 0
             last_progress = 0
@@ -1877,6 +1881,13 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 if data:
                     if all(check_condition(data, c) for c in conditions):
                         matches.append(data)
+
+                # yfinance 과부하 방지 딜레이
+                await asyncio.sleep(0.3)
+
+                # 50개마다 메모리 정리
+                if processed % 50 == 0:
+                    gc.collect()
 
                 # 100개마다 진행 상황 알림
                 if processed - last_progress >= 100:
@@ -1947,7 +1958,6 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
 
     # 백그라운드 태스크로 실행
-    import asyncio
     asyncio.create_task(run_screening())
 
 
