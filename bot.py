@@ -2197,30 +2197,43 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    await update.message.reply_text("⏳ 백테스팅 분석 중...")
+    await update.message.reply_text("⏳ 백테스팅 분석 중... (1~2분 소요)")
+    chat_id = update.effective_chat.id
 
-    try:
-        result, message, chart_bytes, bench_name = process_backtest(query, start_date, end_date)
-        if not result:
-            await update.message.reply_text(
-                f"❌ '{query}' 종목 데이터를 가져올 수 없어요.\n"
-                "종목명/티커와 날짜를 확인해주세요."
+    async def run_bt():
+        try:
+            # 동기 함수를 별도 스레드에서 실행 (yfinance 호출이 동기)
+            loop = asyncio.get_event_loop()
+            result_tuple = await loop.run_in_executor(
+                None, process_backtest, query, start_date, end_date
             )
-            return
+            result, message, chart_bytes, bench_name = result_tuple
 
-        # 차트 먼저 전송
-        if chart_bytes:
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=chart_bytes,
-                caption=f"📊 {result['name']} ({result['ticker']})"
-            )
+            if not result:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ '{query}' 종목 데이터를 가져올 수 없어요.\n종목명/티커와 날짜를 확인해주세요."
+                )
+                return
 
-        # 텍스트 결과
-        await update.message.reply_text(message, disable_web_page_preview=True)
-    except Exception as e:
-        logger.exception("백테스팅 실패")
-        await update.message.reply_text(f"⚠️ 오류: {e}")
+            # 차트 먼저 전송
+            if chart_bytes:
+                try:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=chart_bytes,
+                        caption=f"📊 {result['name']} ({result['ticker']})"
+                    )
+                except Exception as e:
+                    logger.warning(f"차트 전송 실패: {e}")
+
+            # 텍스트 결과
+            await context.bot.send_message(chat_id=chat_id, text=message, disable_web_page_preview=True)
+        except Exception as e:
+            logger.exception("백테스팅 실패")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 오류: {e}")
+
+    asyncio.create_task(run_bt())
 
 
 async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2421,7 +2434,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     load_stock_map()
     load_screening_universe()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .read_timeout(60)
+        .write_timeout(60)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("factor", factor_cmd))
