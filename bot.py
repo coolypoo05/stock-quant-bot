@@ -1616,14 +1616,19 @@ def run_backtest(ticker: str, start_date: str, end_date: str = None,
         else:
             hist = t.history(start=start_date)
 
+        logger.info(f"run_backtest: ticker={ticker}, hist len={len(hist) if hist is not None else 0}")
+
         if hist is None or hist.empty or len(hist) < 2:
             return None
 
-        prices = hist["Close"]
+        prices = hist["Close"].dropna()  # NaN 제거
+        if len(prices) < 2:
+            logger.warning(f"유효 데이터 부족: {ticker}")
+            return None
         actual_start = prices.index[0].strftime("%Y-%m-%d")
         actual_end = prices.index[-1].strftime("%Y-%m-%d")
-        start_price = prices.iloc[0]
-        end_price = prices.iloc[-1]
+        start_price = float(prices.iloc[0])
+        end_price = float(prices.iloc[-1])
 
         # 수익률 계산
         total_return = ((end_price - start_price) / start_price) * 100
@@ -1656,12 +1661,11 @@ def run_backtest(ticker: str, start_date: str, end_date: str = None,
                 else:
                     bh = tb.history(start=start_date)
                 if bh is not None and not bh.empty:
-                    bench_prices = bh["Close"]
-                    # 같은 날짜 범위로 정렬
+                    bench_prices = bh["Close"].dropna()
                     common_dates = prices.index.intersection(bench_prices.index)
                     if len(common_dates) > 1:
-                        b_start = bench_prices.loc[common_dates[0]]
-                        b_end = bench_prices.loc[common_dates[-1]]
+                        b_start = float(bench_prices.loc[common_dates[0]])
+                        b_end = float(bench_prices.loc[common_dates[-1]])
                         bench_return = ((b_end - b_start) / b_start) * 100
             except Exception:
                 pass
@@ -1670,9 +1674,13 @@ def run_backtest(ticker: str, start_date: str, end_date: str = None,
         milestones = []
         for years_after, label in [(1, "1년"), (3, "3년"), (5, "5년"), (10, "10년")]:
             target = prices.index[0] + pd.Timedelta(days=int(365.25 * years_after))
+            if target > prices.index[-1]:
+                break  # 아직 해당 시점이 안 됐으면 스킵
             past_prices = prices[prices.index <= target]
             if len(past_prices) > 1:
-                p = past_prices.iloc[-1]
+                p = float(past_prices.iloc[-1])
+                if np.isnan(p) or start_price == 0:
+                    continue
                 ret = ((p - start_price) / start_price) * 100
                 date_label = past_prices.index[-1].strftime("%Y-%m-%d")
                 milestones.append((label, date_label, ret))
@@ -1841,6 +1849,7 @@ def process_backtest(query: str, start_date: str, end_date: str = None) -> tuple
     # 한국 주식
     if ticker is None:
         result = search_kor_stock(query)
+        logger.info(f"search_kor_stock({query}) → {result}")
         if result:
             code, kor_name, suffix = result
             ticker = code + suffix
@@ -1848,6 +1857,8 @@ def process_backtest(query: str, start_date: str, end_date: str = None) -> tuple
             currency = "KRW"
             benchmark = "^KS11" if suffix == ".KS" else "^KQ11"
             benchmark_name = "KOSPI" if suffix == ".KS" else "KOSDAQ"
+
+    logger.info(f"process_backtest: query={query}, ticker={ticker}, start={start_date}")
 
     # 미국 재시도
     if ticker is None and not re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
