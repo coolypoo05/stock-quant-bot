@@ -2071,6 +2071,8 @@ def check_condition(data: dict, cond: dict) -> bool:
         return False
     op = cond["op"]
     target = cond["val"]
+    # 부동소수점 오차 방지: 소수점 4자리로 반올림
+    val = round(float(val), 4)
     if op == "<":
         return val < target
     elif op == "<=":
@@ -2098,6 +2100,12 @@ def fetch_stock_quick(item: dict) -> dict | None:
             if val is None:
                 return None
             return val * 100 if abs(val) < 10 else val
+
+        def div_pct(val):
+            """배당수익률 전용: yfinance는 항상 소수(0.015 = 1.5%)로 반환."""
+            if val is None:
+                return None
+            return val * 100  # 무조건 × 100
 
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         market_cap = info.get("marketCap")
@@ -2139,9 +2147,9 @@ def fetch_stock_quick(item: dict) -> dict | None:
             "debt_to_equity": info.get("debtToEquity"),
             "current_ratio": info.get("currentRatio"),
             "interest_coverage": None,  # t.info에 없어서 생략
-            # 배당
-            "dividend_yield": pct(info.get("dividendYield")),
-            "payout_ratio": pct(info.get("payoutRatio")),
+            # 배당 (yfinance는 항상 소수로 반환 → 무조건 × 100)
+            "dividend_yield": div_pct(info.get("dividendYield")),
+            "payout_ratio": div_pct(info.get("payoutRatio")),
             # 성장 (% 변환)
             "revenue_growth": pct(info.get("revenueGrowth")),
             "earnings_growth": pct(info.get("earningsGrowth")),
