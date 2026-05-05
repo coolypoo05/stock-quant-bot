@@ -2451,7 +2451,7 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 if m.get("pe_ratio") and m["pe_ratio"] > 0:
                     parts.append(f"PER {m['pe_ratio']:.2f}")
                 if m.get("pb_ratio") and m["pb_ratio"] > 0:
-                    parts.append(f"PBR {m['pb_ratio']:.2f}")
+                    parts.append(f"PBR {m['pb_ratio']:.3f}")
                 if m.get("roe") is not None:
                     parts.append(f"ROE {m['roe']:.1f}%")
                 if m.get("dividend_yield"):
