@@ -1884,6 +1884,7 @@ def process_backtest(query: str, start_date: str, end_date: str = None) -> tuple
 # ============================================================
 
 SCREENING_UNIVERSE = []  # [{"code", "name", "suffix", "market"}]
+ACTIVE_SCREENINGS = {}   # {chat_id: {"cancel": False}}
 
 
 def load_screening_universe():
@@ -2197,6 +2198,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /screen PER<10 ROE>15       (전체)\n"
         "  /screen KR PER<10 ROE>15    (한국만)\n"
         "  /screen US DIV>3 ROE>15     (미국만)\n"
+        "  /stop_screen                (진행 중단)\n"
         "  /screen 만 입력하면 도움말\n\n"
         "📊 백테스팅:\n"
         "  /backtest <종목> <시작일> [종료일]\n"
@@ -2397,6 +2399,17 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     chat_id = update.effective_chat.id
 
+    # 이미 진행 중인 스크리닝 있으면 거부
+    if chat_id in ACTIVE_SCREENINGS:
+        await update.message.reply_text(
+            "⚠️ 이미 진행 중인 스크리닝이 있어요.\n"
+            "/stop_screen 으로 중단 후 다시 시도하세요."
+        )
+        return
+
+    # 진행 상태 등록
+    ACTIVE_SCREENINGS[chat_id] = {"cancel": False}
+
     # 비동기 백그라운드 실행
     async def run_screening():
         try:
@@ -2406,6 +2419,14 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             last_progress = 0
 
             for item in universe:
+                # 중단 체크
+                if ACTIVE_SCREENINGS.get(chat_id, {}).get("cancel"):
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🛑 스크리닝 중단됨 ({processed}/{total})"
+                    )
+                    return
+
                 processed += 1
                 data = fetch_stock_quick(item)
                 if data:
@@ -2485,8 +2506,21 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 chat_id=chat_id,
                 text=f"⚠️ 스크리닝 중 오류: {e}"
             )
+        finally:
+            # 진행 상태 정리
+            ACTIVE_SCREENINGS.pop(chat_id, None)
 
     asyncio.create_task(run_screening())
+
+
+async def stop_screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """진행 중인 스크리닝을 중단."""
+    chat_id = update.effective_chat.id
+    if chat_id in ACTIVE_SCREENINGS:
+        ACTIVE_SCREENINGS[chat_id]["cancel"] = True
+        await update.message.reply_text("🛑 스크리닝 중단 요청됨. 잠시 후 멈춰요.")
+    else:
+        await update.message.reply_text("⚠️ 진행 중인 스크리닝이 없어요.")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2521,6 +2555,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("factor", factor_cmd))
     app.add_handler(CommandHandler("screen", screen_cmd))
+    app.add_handler(CommandHandler("stop_screen", stop_screen_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("퀀트 봇 시작...")
