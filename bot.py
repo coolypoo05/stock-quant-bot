@@ -2102,12 +2102,14 @@ def fetch_stock_quick(item: dict) -> dict | None:
             return val * 100 if abs(val) < 10 else val
 
         def div_pct(val):
-            """배당수익률: 0~1 사이면 소수로 보고 × 100, 그 이상이면 이미 % 단위."""
+            """배당수익률: yfinance는 항상 소수(0.015 = 1.5%)로 반환."""
             if val is None:
                 return None
-            if val < 1:
-                return val * 100  # 소수 → %
-            return val  # 이미 % 단위
+            # yfinance dividendYield는 항상 0~1 사이 소수
+            # 예외적으로 이미 %인 경우(>0.2 = 20% 이상)는 비정상으로 간주
+            if val > 0.2:
+                return None  # 20% 초과 배당은 데이터 오류로 처리
+            return round(val * 100, 2)
 
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         market_cap = info.get("marketCap")
@@ -2448,19 +2450,21 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 flag = flag_map.get(m["market"], "🌐")
                 msg += f"{i}. {flag} {m['name']} ({m['code']})\n"
                 parts = []
-                if m.get("pe_ratio") and m["pe_ratio"] > 0:
-                    parts.append(f"PER {m['pe_ratio']:.2f}")
-                if m.get("pb_ratio") and m["pb_ratio"] > 0:
-                    parts.append(f"PBR {m['pb_ratio']:.3f}")
-                if m.get("roe") is not None:
-                    parts.append(f"ROE {m['roe']:.1f}%")
-                if m.get("dividend_yield"):
-                    parts.append(f"DIV {m['dividend_yield']:.1f}%")
-                if m.get("market_cap_bil"):
+                pe = m.get("pe_ratio")
+                pb = m.get("pb_ratio")
+                roe = m.get("roe")
+                div = m.get("dividend_yield")
+                cap = m.get("market_cap_bil")
+
+                parts.append(f"PER {pe:.2f}" if pe and pe > 0 else "PER N/A")
+                parts.append(f"PBR {pb:.3f}" if pb and pb > 0 else "PBR N/A")
+                parts.append(f"ROE {roe:.1f}%" if roe is not None else "ROE N/A")
+                parts.append(f"DIV {div:.2f}%" if div else "무배당")
+                if cap:
                     if m["market"] != "SP500":
-                        parts.append(f"시총 {m['market_cap_bil']:.0f}억")
+                        parts.append(f"시총 {cap:.0f}억")
                     else:
-                        parts.append(f"시총 ${m['market_cap_bil']:.0f}M")
+                        parts.append(f"시총 ${cap:.0f}M")
                 if parts:
                     msg += "   " + " | ".join(parts) + "\n"
 
