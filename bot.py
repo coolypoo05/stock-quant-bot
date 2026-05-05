@@ -2364,7 +2364,11 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("⚠️ 종목 리스트가 아직 로딩되지 않았어요. 잠시 후 다시 시도하세요.")
         return
 
-    cond_summary = ", ".join([f"{c['raw']}{c['op']}{c['val']}" for c in conditions])
+    cond_summary = ", ".join([
+        c["raw"] if c.get("type") in ("compare", "positive")
+        else f"{c['raw']}{c['op']}{c['val']}"
+        for c in conditions
+    ])
     total = len(universe)
 
     # 예상 시간 계산
