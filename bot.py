@@ -2023,15 +2023,52 @@ def parse_screen_conditions(text: str) -> list:
                 "val": val,
                 "raw": metric,
             })
+    # 특수 키워드 파싱 (두 지표 간 비교)
+    special_keywords = {
+        "IMPROVING": {"type": "compare", "key1": "pe_ratio", "key2": "forward_pe", "op": ">",
+                      "desc": "PER > Forward PER (실적 개선 기대)"},
+        "DETERIORATING": {"type": "compare", "key1": "pe_ratio", "key2": "forward_pe", "op": "<",
+                          "desc": "PER < Forward PER (실적 둔화 우려)"},
+        "PROFITABLE": {"type": "positive", "key": "eps", "desc": "EPS 흑자"},
+        "DIVIDEND": {"type": "positive", "key": "dividend_yield", "desc": "배당 지급 종목"},
+    }
+    for keyword, spec in special_keywords.items():
+        if re.search(rf"\b{keyword}\b", text, re.IGNORECASE):
+            conditions.append({"type": spec["type"], **spec, "raw": keyword})
+
     return conditions
 
 
 def check_condition(data: dict, cond: dict) -> bool:
     """조건 1개 체크."""
+    cond_type = cond.get("type", "normal")
+
+    # 두 지표 간 비교 (예: PER > Forward PER)
+    if cond_type == "compare":
+        v1 = data.get(cond["key1"])
+        v2 = data.get(cond["key2"])
+        if v1 is None or v2 is None or v1 <= 0 or v2 <= 0:
+            return False
+        op = cond["op"]
+        if op == ">":
+            return v1 > v2
+        elif op == "<":
+            return v1 < v2
+        elif op == ">=":
+            return v1 >= v2
+        elif op == "<=":
+            return v1 <= v2
+        return False
+
+    # 양수 여부 체크
+    if cond_type == "positive":
+        val = data.get(cond["key"])
+        return val is not None and val > 0
+
+    # 일반 숫자 조건
     val = data.get(cond["key"])
     if val is None:
         return False
-
     op = cond["op"]
     target = cond["val"]
     if op == "<":
@@ -2276,11 +2313,17 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "  PRICE\n"
             "    🇰🇷 한국: 원  예) PRICE<50000\n"
             "    🇺🇸 미국: 달러  예) PRICE<100\n\n"
+            "🔑 특수 키워드:\n"
+            "  IMPROVING     → PER > Forward PER (실적 개선 기대)\n"
+            "  DETERIORATING → PER < Forward PER (실적 둔화 우려)\n"
+            "  PROFITABLE    → EPS 흑자 종목만\n"
+            "  DIVIDEND      → 배당 지급 종목만\n\n"
             "연산자: <, <=, >, >=, =\n\n"
             "예시:\n"
+            "  /screen KR IMPROVING ROE>10\n"
             "  /screen KR PER<10 ROE>15\n"
-            "  /screen US DIV>3 GROSSMARGIN>40\n"
-            "  /screen PBR<1 ROE>10 DEBT<100"
+            "  /screen US DIVIDEND GROSSMARGIN>40\n"
+            "  /screen PROFITABLE PBR<1 ROE>10"
         )
         return
 
