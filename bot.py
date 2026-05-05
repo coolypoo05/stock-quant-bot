@@ -2102,10 +2102,12 @@ def fetch_stock_quick(item: dict) -> dict | None:
             return val * 100 if abs(val) < 10 else val
 
         def div_pct(val):
-            """배당수익률 전용: yfinance는 항상 소수(0.015 = 1.5%)로 반환."""
+            """배당수익률: 0~1 사이면 소수로 보고 × 100, 그 이상이면 이미 % 단위."""
             if val is None:
                 return None
-            return val * 100  # 무조건 × 100
+            if val < 1:
+                return val * 100  # 소수 → %
+            return val  # 이미 % 단위
 
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         market_cap = info.get("marketCap")
@@ -2447,9 +2449,9 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 msg += f"{i}. {flag} {m['name']} ({m['code']})\n"
                 parts = []
                 if m.get("pe_ratio") and m["pe_ratio"] > 0:
-                    parts.append(f"PER {m['pe_ratio']:.1f}")
+                    parts.append(f"PER {m['pe_ratio']:.2f}")
                 if m.get("pb_ratio") and m["pb_ratio"] > 0:
-                    parts.append(f"PBR {m['pb_ratio']:.1f}")
+                    parts.append(f"PBR {m['pb_ratio']:.2f}")
                 if m.get("roe") is not None:
                     parts.append(f"ROE {m['roe']:.1f}%")
                 if m.get("dividend_yield"):
