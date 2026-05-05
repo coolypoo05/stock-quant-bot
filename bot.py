@@ -2102,14 +2102,16 @@ def fetch_stock_quick(item: dict) -> dict | None:
             return val * 100 if abs(val) < 10 else val
 
         def div_pct(val):
-            """배당수익률: yfinance는 항상 소수(0.015 = 1.5%)로 반환."""
+            """배당수익률: yfinance가 소수(0.035) 또는 %(3.5) 혼용 반환."""
             if val is None:
                 return None
-            # yfinance dividendYield는 항상 0~1 사이 소수
-            # 예외적으로 이미 %인 경우(>0.2 = 20% 이상)는 비정상으로 간주
-            if val > 0.2:
-                return None  # 20% 초과 배당은 데이터 오류로 처리
-            return round(val * 100, 2)
+            if val <= 0:
+                return None
+            if val < 0.2:
+                return round(val * 100, 2)  # 소수 → %
+            elif val <= 100:
+                return round(val, 2)  # 이미 %
+            return None  # 100% 초과는 오류
 
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         market_cap = info.get("marketCap")
