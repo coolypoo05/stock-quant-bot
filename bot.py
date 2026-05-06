@@ -2389,15 +2389,15 @@ def run_portfolio_backtest(holdings: list, start_date: str, end_date: str = None
                 hist = t.history(start=start_date, end=end_date)
             else:
                 hist = t.history(start=start_date)
-            hist["Close"] = hist["Close"].dropna()
-            if hist.empty or len(hist) < 2:
+            prices = hist["Close"].dropna()  # NaN 제거
+            if prices.empty or len(prices) < 2:
                 return None
             return {
                 "ticker": ticker,
                 "name": name,
                 "weight": h["weight"],
                 "currency": currency,
-                "prices": hist["Close"],
+                "prices": prices,
             }
         except Exception as e:
             logger.warning(f"포트폴리오 데이터 수집 실패 ({ticker}): {e}")
@@ -2434,20 +2434,23 @@ def run_portfolio_backtest(holdings: list, start_date: str, end_date: str = None
     individual_results = []
 
     for r in results:
-        prices = r["prices"].loc[common_dates]
+        prices = r["prices"].reindex(common_dates).fillna(method="ffill").dropna()
+        if prices.empty:
+            continue
         start_price = float(prices.iloc[0])
         end_price = float(prices.iloc[-1])
+        if start_price == 0 or np.isnan(start_price) or np.isnan(end_price):
+            continue
         alloc = initial * r["weight"]
         shares = alloc / start_price
         values = prices * shares
 
-        # 개별 수익률
         total_ret = ((end_price - start_price) / start_price) * 100
         days = (prices.index[-1] - prices.index[0]).days
         years = days / 365.25
         cagr = ((end_price / start_price) ** (1 / years) - 1) * 100 if years > 0 else 0
 
-        portfolio_values = portfolio_values.add(values)
+        portfolio_values = portfolio_values.add(values, fill_value=0)
         individual_results.append({
             "ticker": r["ticker"],
             "name": r["name"],
@@ -2463,8 +2466,13 @@ def run_portfolio_backtest(holdings: list, start_date: str, end_date: str = None
         })
 
     # 4. 포트폴리오 전체 지표
+    portfolio_values = portfolio_values.dropna()
+    if portfolio_values.empty or len(portfolio_values) < 2:
+        return None
     port_start = float(portfolio_values.iloc[0])
     port_end = float(portfolio_values.iloc[-1])
+    if port_start == 0 or np.isnan(port_start) or np.isnan(port_end):
+        return None
     total_return = ((port_end - port_start) / port_start) * 100
     days = (common_dates[-1] - common_dates[0]).days
     years = days / 365.25
