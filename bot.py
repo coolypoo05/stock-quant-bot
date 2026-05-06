@@ -401,30 +401,67 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
         if not info:
             return None
 
-        debt_ratio = calc_debt_to_equity(t_obj) if t_obj else info.get("debtToEquity")
-        op_margin = calc_ttm_operating_margin(t_obj) if t_obj else info.get("operatingMargins")
-        ev_ebitda = calc_ev_ebitda(t_obj, info) if t_obj else None
-        interest_coverage = calc_interest_coverage(t_obj) if t_obj else None
-        revenue_growth = calc_revenue_growth(t_obj) if t_obj else None
-        dividend_growth = calc_dividend_growth(t_obj) if t_obj else {}
+        # 병렬로 무거운 데이터 수집 (ThreadPoolExecutor)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # F-Score 계산 (별도 단계로 데이터 수집 후)
-        temp_data = {"market_cap": info.get("marketCap")}
-        fscore_info = calc_piotroski_fscore(t_obj, temp_data) if t_obj else None
+        def _calc_debt():
+            return calc_debt_to_equity(t_obj)
+        def _calc_op_margin():
+            return calc_ttm_operating_margin(t_obj)
+        def _calc_ev():
+            return calc_ev_ebitda(t_obj, info)
+        def _calc_ic():
+            return calc_interest_coverage(t_obj)
+        def _calc_rev():
+            return calc_revenue_growth(t_obj)
+        def _calc_div():
+            return calc_dividend_growth(t_obj)
+        def _calc_fscore():
+            return calc_piotroski_fscore(t_obj, {"market_cap": info.get("marketCap")})
+        def _calc_naver():
+            pe = info.get("trailingPE")
+            pb = info.get("priceToBook")
+            if pe is None or pb is None:
+                return get_naver_per_pbr(code)
+            return {"per": None, "pbr": None}
+        def _calc_fwd_eps():
+            feps = info.get("forwardEps")
+            if feps is None:
+                return get_wisereport_forward_eps(code)
+            return feps
 
-        # PER, PBR: yfinance → None이면 네이버 fallback
-        pe_ratio = info.get("trailingPE")
-        pb_ratio = info.get("priceToBook")
-        if pe_ratio is None or pb_ratio is None:
-            naver = get_naver_per_pbr(code)
-            if pe_ratio is None and naver["per"]:
-                pe_ratio = naver["per"]
-                logger.info(f"PER 네이버 fallback: {code} = {pe_ratio}")
-            if pb_ratio is None and naver["pbr"]:
-                pb_ratio = naver["pbr"]
-                logger.info(f"PBR 네이버 fallback: {code} = {pb_ratio}")
+        tasks = {
+            "debt": _calc_debt, "op_margin": _calc_op_margin,
+            "ev": _calc_ev, "ic": _calc_ic, "rev": _calc_rev,
+            "div": _calc_div, "fscore": _calc_fscore,
+            "naver": _calc_naver, "fwd_eps": _calc_fwd_eps,
+        }
 
-        # EPS: yfinance → None이면 재무제표 직접 계산
+        results = {}
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            future_map = {executor.submit(fn): key for key, fn in tasks.items()}
+            for future in as_completed(future_map):
+                key = future_map[future]
+                try:
+                    results[key] = future.result()
+                except Exception as e:
+                    logger.debug(f"병렬 계산 실패 ({key}): {e}")
+                    results[key] = None
+
+        debt_ratio = results.get("debt") or info.get("debtToEquity")
+        op_margin = results.get("op_margin") or info.get("operatingMargins")
+        ev_ebitda = results.get("ev")
+        interest_coverage = results.get("ic")
+        revenue_growth = results.get("rev")
+        dividend_growth = results.get("div") or {}
+        fscore_info = results.get("fscore")
+
+        # PER/PBR 네이버 fallback
+        naver = results.get("naver") or {}
+        pe_ratio = info.get("trailingPE") or naver.get("per")
+        pb_ratio = info.get("priceToBook") or naver.get("pbr")
+
+        # EPS
         eps = info.get("trailingEps")
         if eps is None and t_obj:
             eps = calc_eps_from_financials(t_obj)
@@ -479,17 +516,40 @@ def get_us_stock_data(ticker: str):
         info = t.info
         if not info or (info.get("regularMarketPrice") is None and info.get("currentPrice") is None):
             return None
-        hist = t.history(period="1y")
-        debt_ratio = calc_debt_to_equity(t)
-        op_margin = calc_ttm_operating_margin(t)
-        ev_ebitda = calc_ev_ebitda(t, info)
-        interest_coverage = calc_interest_coverage(t)
-        revenue_growth = calc_revenue_growth(t)
-        dividend_growth = calc_dividend_growth(t)
 
-        # F-Score 계산
-        temp_data = {"market_cap": info.get("marketCap")}
-        fscore_info = calc_piotroski_fscore(t, temp_data)
+        # 병렬로 무거운 데이터 수집
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        tasks_us = {
+            "hist":    lambda: t.history(period="1y"),
+            "debt":    lambda: calc_debt_to_equity(t),
+            "op":      lambda: calc_ttm_operating_margin(t),
+            "ev":      lambda: calc_ev_ebitda(t, info),
+            "ic":      lambda: calc_interest_coverage(t),
+            "rev":     lambda: calc_revenue_growth(t),
+            "div":     lambda: calc_dividend_growth(t),
+            "fscore":  lambda: calc_piotroski_fscore(t, {"market_cap": info.get("marketCap")}),
+        }
+
+        res_us = {}
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            future_map = {executor.submit(fn): key for key, fn in tasks_us.items()}
+            for future in as_completed(future_map):
+                key = future_map[future]
+                try:
+                    res_us[key] = future.result()
+                except Exception as e:
+                    logger.debug(f"US 병렬 계산 실패 ({key}): {e}")
+                    res_us[key] = None
+
+        hist = res_us.get("hist")
+        debt_ratio = res_us.get("debt")
+        op_margin = res_us.get("op")
+        ev_ebitda = res_us.get("ev")
+        interest_coverage = res_us.get("ic")
+        revenue_growth = res_us.get("rev")
+        dividend_growth = res_us.get("div") or {}
+        fscore_info = res_us.get("fscore")
 
         return {
             "code": ticker.upper(), "name": info.get("longName") or info.get("shortName") or ticker,
