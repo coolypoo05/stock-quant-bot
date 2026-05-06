@@ -2718,6 +2718,9 @@ async def backtest_portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_T
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 오류: {e}")
 
     asyncio.create_task(run_port_bt())
+
+
+async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """백테스팅 명령어. /backtest 005930 2020-01-01 [2024-12-31]"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
