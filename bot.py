@@ -2434,7 +2434,7 @@ def run_portfolio_backtest(holdings: list, start_date: str, end_date: str = None
     individual_results = []
 
     for r in results:
-        prices = r["prices"].reindex(common_dates).fillna(method="ffill").dropna()
+        prices = r["prices"].reindex(common_dates).ffill().dropna()
         if prices.empty:
             continue
         start_price = float(prices.iloc[0])
