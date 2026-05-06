@@ -2462,8 +2462,8 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 )
                 return
 
-            # ROE 높은 순 정렬
-            matches.sort(key=lambda x: -(x.get("roe") or 0))
+            # 시가총액 큰 순으로 정렬
+            matches.sort(key=lambda x: -(x.get("market_cap_bil") or 0))
 
             flag_map = {"KOSPI200": "🇰🇷", "KOSDAQ150": "🇰🇷", "SP500": "🇺🇸"}
             msg = f"✅ 스크리닝 완료!\n범위: {market_label}\n조건: {cond_summary}\n매칭: {len(matches)}개\n"
