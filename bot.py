@@ -2264,6 +2264,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /backtest <종목> <시작일> [종료일]\n"
         "  예) /backtest 삼성전자 2020-01-01\n"
         "      /backtest AAPL 2018-06-15\n\n"
+        "💼 포트폴리오 백테스팅:\n"
+        "  /backtest_portfolio <종목:비율> ... <시작일> [초기금액]\n"
+        "  예) /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01 10000\n"
+        "      /backtest_portfolio 삼성전자:4 SK하이닉스:3 2020-01-01\n\n"
         "또는 종목명/티커만 입력해도 자동 분석합니다.\n\n"
         "⚙️ 점수 산출 방식:\n"
         "  • 밸류40 + 퀄리티40 + 모멘텀20\n"
@@ -2291,7 +2295,429 @@ async def factor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"⚠️ 오류: {e}")
 
 
-async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ============================================================
+# 포트폴리오 백테스팅
+# ============================================================
+
+def parse_portfolio_args(args: list) -> tuple:
+    """
+    /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01 10000
+    /backtest_portfolio 삼성전자:4 SK하이닉스:3 NAVER:3 2020-01-01 10000000
+    반환: (종목_비율_리스트, 시작일, 종료일, 초기금액)
+    """
+    if len(args) < 3:
+        return None, None, None, None
+
+    holdings = []
+    start_date = None
+    end_date = None
+    initial = None
+
+    for arg in args:
+        # 날짜 형식
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", arg):
+            if start_date is None:
+                start_date = arg
+            else:
+                end_date = arg
+        # 숫자 (초기 투자금)
+        elif re.fullmatch(r"\d+", arg):
+            initial = int(arg)
+        # 종목:비율
+        elif ":" in arg:
+            parts = arg.split(":")
+            if len(parts) == 2:
+                ticker = parts[0].strip()
+                try:
+                    weight = float(parts[1])
+                    holdings.append({"ticker": ticker, "weight": weight})
+                except ValueError:
+                    pass
+
+    if not holdings or not start_date:
+        return None, None, None, None
+
+    # 비율 정규화 (합이 1이 되도록)
+    total_weight = sum(h["weight"] for h in holdings)
+    for h in holdings:
+        h["weight"] = h["weight"] / total_weight
+
+    # 기본 초기 투자금
+    if initial is None:
+        initial = 10_000_000  # 기본 천만원
+
+    return holdings, start_date, end_date, initial
+
+
+def run_portfolio_backtest(holdings: list, start_date: str, end_date: str = None,
+                           initial: int = 10_000_000) -> dict | None:
+    """포트폴리오 백테스팅 실행."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # 1. 각 종목 데이터 병렬 수집
+    def fetch_ticker(h):
+        query = h["ticker"]
+        ticker = None
+        name = query
+        currency = "USD"
+        suffix = ""
+
+        # 한국 주식 시도
+        result = search_kor_stock(query)
+        if result:
+            code, kor_name, sfx = result
+            ticker = code + sfx
+            name = kor_name
+            currency = "KRW"
+        # 영문 → 미국 주식
+        elif re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
+            ticker = query.upper()
+            name = query.upper()
+            currency = "USD"
+            try:
+                info = yf.Ticker(ticker).info
+                name = info.get("longName") or info.get("shortName") or ticker
+            except Exception:
+                pass
+
+        if not ticker:
+            return None
+
+        try:
+            t = yf.Ticker(ticker)
+            if end_date:
+                hist = t.history(start=start_date, end=end_date)
+            else:
+                hist = t.history(start=start_date)
+            hist["Close"] = hist["Close"].dropna()
+            if hist.empty or len(hist) < 2:
+                return None
+            return {
+                "ticker": ticker,
+                "name": name,
+                "weight": h["weight"],
+                "currency": currency,
+                "prices": hist["Close"],
+            }
+        except Exception as e:
+            logger.warning(f"포트폴리오 데이터 수집 실패 ({ticker}): {e}")
+            return None
+
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(fetch_ticker, h) for h in holdings]
+        for f in as_completed(futures):
+            r = f.result()
+            if r:
+                results.append(r)
+
+    if not results:
+        return None
+
+    # 통화 혼용 체크
+    currencies = set(r["currency"] for r in results)
+    if len(currencies) > 1:
+        return {"error": "mixed_currency", "currencies": list(currencies)}
+
+    currency = list(currencies)[0]
+
+    # 2. 공통 날짜 범위로 정렬
+    common_dates = results[0]["prices"].index
+    for r in results[1:]:
+        common_dates = common_dates.intersection(r["prices"].index)
+
+    if len(common_dates) < 2:
+        return None
+
+    # 3. 포트폴리오 가치 계산 (매수 후 방치)
+    portfolio_values = pd.Series(0.0, index=common_dates)
+    individual_results = []
+
+    for r in results:
+        prices = r["prices"].loc[common_dates]
+        start_price = float(prices.iloc[0])
+        end_price = float(prices.iloc[-1])
+        alloc = initial * r["weight"]
+        shares = alloc / start_price
+        values = prices * shares
+
+        # 개별 수익률
+        total_ret = ((end_price - start_price) / start_price) * 100
+        days = (prices.index[-1] - prices.index[0]).days
+        years = days / 365.25
+        cagr = ((end_price / start_price) ** (1 / years) - 1) * 100 if years > 0 else 0
+
+        portfolio_values = portfolio_values.add(values)
+        individual_results.append({
+            "ticker": r["ticker"],
+            "name": r["name"],
+            "weight": r["weight"],
+            "alloc": alloc,
+            "start_price": start_price,
+            "end_price": end_price,
+            "shares": shares,
+            "final_value": float(values.iloc[-1]),
+            "total_return": total_ret,
+            "cagr": cagr,
+            "prices": prices,
+        })
+
+    # 4. 포트폴리오 전체 지표
+    port_start = float(portfolio_values.iloc[0])
+    port_end = float(portfolio_values.iloc[-1])
+    total_return = ((port_end - port_start) / port_start) * 100
+    days = (common_dates[-1] - common_dates[0]).days
+    years = days / 365.25
+    cagr = ((port_end / port_start) ** (1 / years) - 1) * 100 if years > 0 else 0
+
+    daily_returns = portfolio_values.pct_change().dropna()
+    annual_vol = daily_returns.std() * np.sqrt(252) * 100
+    sharpe = (cagr / annual_vol) if annual_vol > 0 else 0
+
+    # MDD
+    cummax = portfolio_values.cummax()
+    dd = (portfolio_values - cummax) / cummax * 100
+    mdd = float(dd.min())
+    mdd_date = dd.idxmin().strftime("%Y-%m-%d") if pd.notna(dd.idxmin()) else ""
+
+    # 5. 벤치마크
+    bench_ticker = "^GSPC" if currency == "USD" else "^KS11"
+    bench_name = "S&P 500" if currency == "USD" else "KOSPI"
+    bench_return = None
+    bench_prices = None
+    try:
+        tb = yf.Ticker(bench_ticker)
+        if end_date:
+            bh = tb.history(start=start_date, end=end_date)
+        else:
+            bh = tb.history(start=start_date)
+        if bh is not None and not bh.empty:
+            bp = bh["Close"].dropna()
+            common_b = common_dates.intersection(bp.index)
+            if len(common_b) > 1:
+                bench_prices = bp.loc[common_b]
+                bench_return = ((float(bench_prices.iloc[-1]) - float(bench_prices.iloc[0]))
+                                / float(bench_prices.iloc[0])) * 100
+    except Exception:
+        pass
+
+    return {
+        "currency": currency,
+        "initial": initial,
+        "actual_start": common_dates[0].strftime("%Y-%m-%d"),
+        "actual_end": common_dates[-1].strftime("%Y-%m-%d"),
+        "years": years,
+        "port_start": port_start,
+        "port_end": port_end,
+        "total_return": total_return,
+        "cagr": cagr,
+        "annual_vol": annual_vol,
+        "sharpe": sharpe,
+        "mdd": mdd,
+        "mdd_date": mdd_date,
+        "bench_return": bench_return,
+        "bench_name": bench_name,
+        "portfolio_values": portfolio_values,
+        "bench_prices": bench_prices,
+        "individual": individual_results,
+    }
+
+
+def create_portfolio_chart(result: dict) -> bytes:
+    """포트폴리오 백테스팅 차트 생성."""
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={"height_ratios": [2, 1]})
+
+    try:
+        plt.rcParams["axes.unicode_minus"] = False
+    except Exception:
+        pass
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+
+    ax1 = axes[0]
+    port_vals = result["portfolio_values"]
+    norm_port = (port_vals / port_vals.iloc[0]) * 100
+    ax1.plot(norm_port.index, norm_port.values, label="포트폴리오",
+             color="black", linewidth=2.5, zorder=5)
+
+    # 개별 종목
+    for i, item in enumerate(result["individual"]):
+        norm = (item["prices"] / item["prices"].iloc[0]) * 100
+        label = f"{item['name']} ({item['weight']*100:.0f}%)"
+        ax1.plot(norm.index, norm.values, label=label,
+                 color=colors[i % len(colors)], linewidth=1.2, alpha=0.7, linestyle="--")
+
+    # 벤치마크
+    if result["bench_prices"] is not None:
+        bp = result["bench_prices"]
+        norm_b = (bp / bp.iloc[0]) * 100
+        ax1.plot(norm_b.index, norm_b.values, label=result["bench_name"],
+                 color="gray", linewidth=1.5, alpha=0.8, linestyle=":")
+
+    ax1.set_title(f"포트폴리오 백테스팅 ({result['actual_start']} ~ {result['actual_end']})",
+                  fontsize=13, fontweight="bold")
+    ax1.set_ylabel("정규화 수익률 (시작 = 100)")
+    ax1.legend(loc="upper left", fontsize=8)
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(100, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+
+    # 낙폭
+    ax2 = axes[1]
+    cummax = port_vals.cummax()
+    dd = (port_vals - cummax) / cummax * 100
+    ax2.fill_between(dd.index, dd.values, 0, color="red", alpha=0.3)
+    ax2.plot(dd.index, dd.values, color="darkred", linewidth=1)
+    ax2.set_ylabel("포트폴리오 낙폭 (%)")
+    ax2.set_xlabel("날짜")
+    ax2.grid(True, alpha=0.3)
+    ax2.axhline(0, color="gray", linewidth=0.5)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf.read()
+
+
+def format_portfolio_message(result: dict) -> str:
+    """포트폴리오 백테스팅 결과 메시지."""
+    cur = result["currency"]
+    sym = "₩" if cur == "KRW" else "$"
+    fmt = lambda v: f"{sym}{v:,.0f}" if cur == "KRW" else f"{sym}{v:,.2f}"
+
+    msg = "📊 포트폴리오 백테스팅 결과\n"
+    msg += "━━━━━━━━━━━━━━━\n"
+    msg += f"📅 기간: {result['actual_start']} ~ {result['actual_end']}\n"
+    msg += f"   (약 {result['years']:.1f}년)\n\n"
+
+    # 구성
+    msg += f"⚙️ 구성 (초기 투자금: {fmt(result['initial'])})\n"
+    for item in result["individual"]:
+        alloc = fmt(item["alloc"])
+        msg += f"   {item['name']} {item['weight']*100:.0f}% ({alloc})\n"
+    msg += "\n"
+
+    # 개별 수익률
+    msg += "📈 개별 수익률\n"
+    for item in result["individual"]:
+        sign = "+" if item["total_return"] >= 0 else ""
+        msg += (f"   {item['name']}: {sign}{item['total_return']:.1f}%"
+                f" → {fmt(item['final_value'])}\n")
+    msg += "\n"
+
+    # 포트폴리오 전체
+    sign = "+" if result["total_return"] >= 0 else ""
+    msg += "💼 포트폴리오 전체\n"
+    msg += f"   최종 평가금액: {fmt(result['port_end'])}\n"
+    msg += f"   총 수익률: {sign}{result['total_return']:.2f}%\n"
+    msg += f"   연평균 (CAGR): {sign}{result['cagr']:.2f}%\n\n"
+
+    # 벤치마크
+    if result["bench_return"] is not None:
+        bsign = "+" if result["bench_return"] >= 0 else ""
+        excess = result["total_return"] - result["bench_return"]
+        esign = "+" if excess >= 0 else ""
+        msg += f"📊 vs {result['bench_name']}\n"
+        msg += f"   {result['bench_name']}: {bsign}{result['bench_return']:.2f}%\n"
+        msg += f"   초과 수익: {esign}{excess:.2f}%p\n\n"
+
+    # 리스크
+    msg += "⚠️ 리스크\n"
+    msg += f"   최대 낙폭 (MDD): {result['mdd']:.2f}% ({result['mdd_date']})\n"
+    msg += f"   연환산 변동성: {result['annual_vol']:.2f}%\n"
+    msg += f"   샤프 비율: {result['sharpe']:.2f}\n"
+    msg += "\n💡 과거 수익률이 미래를 보장하지 않습니다."
+    return msg
+
+
+async def backtest_portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """포트폴리오 백테스팅 명령어.
+    /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01 10000
+    /backtest_portfolio 삼성전자:4 SK하이닉스:3 NAVER:3 2020-01-01 10000000
+    """
+    if not context.args or len(context.args) < 3:
+        await update.message.reply_text(
+            "📊 포트폴리오 백테스팅 사용법:\n"
+            "/backtest_portfolio <종목:비율> ... <시작일> [초기금액]\n\n"
+            "예시:\n"
+            "  🇺🇸 미국:\n"
+            "  /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01 10000\n\n"
+            "  🇰🇷 한국:\n"
+            "  /backtest_portfolio 삼성전자:4 SK하이닉스:3 NAVER:3 2020-01-01 10000000\n\n"
+            "⚠️ 주의:\n"
+            "  • 한국/미국 종목 혼용 불가\n"
+            "  • 비율은 상대값 (4:3:3 → 40%, 30%, 30%)\n"
+            "  • 초기금액 생략 시: 한국 1천만원 / 미국 $10,000\n"
+            "  • 리밸런싱 없음 (매수 후 방치)"
+        )
+        return
+
+    holdings, start_date, end_date, initial = parse_portfolio_args(context.args)
+
+    if not holdings:
+        await update.message.reply_text(
+            "❌ 입력 형식이 잘못됐어요.\n"
+            "예) /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01"
+        )
+        return
+
+    names = [h["ticker"] for h in holdings]
+    await update.message.reply_text(
+        f"⏳ 포트폴리오 백테스팅 중...\n"
+        f"종목: {', '.join(names)}\n"
+        f"기간: {start_date} ~\n"
+        f"잠시만 기다려주세요!"
+    )
+
+    chat_id = update.effective_chat.id
+
+    async def run_port_bt():
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, run_portfolio_backtest, holdings, start_date, end_date, initial
+            )
+
+            if not result:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ 데이터를 가져올 수 없어요.\n종목명/티커와 날짜를 확인해주세요."
+                )
+                return
+
+            # 통화 혼용 에러
+            if result.get("error") == "mixed_currency":
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "❌ 한국과 미국 종목을 함께 사용할 수 없어요.\n"
+                        "같은 통화의 종목끼리만 가능해요.\n"
+                        "🇰🇷 한국끼리 또는 🇺🇸 미국끼리 입력해주세요."
+                    )
+                )
+                return
+
+            # 차트 전송
+            chart_bytes = create_portfolio_chart(result)
+            if chart_bytes:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=chart_bytes,
+                    caption="📊 포트폴리오 백테스팅 차트"
+                )
+
+            # 텍스트 결과
+            message = format_portfolio_message(result)
+            await context.bot.send_message(
+                chat_id=chat_id, text=message, disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.exception("포트폴리오 백테스팅 실패")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 오류: {e}")
+
+    asyncio.create_task(run_port_bt())
     """백테스팅 명령어. /backtest 005930 2020-01-01 [2024-12-31]"""
     if not context.args or len(context.args) < 2:
         await update.message.reply_text(
@@ -2617,6 +3043,7 @@ def main() -> None:
     app.add_handler(CommandHandler("screen", screen_cmd))
     app.add_handler(CommandHandler("stop_screen", stop_screen_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
+    app.add_handler(CommandHandler("backtest_portfolio", backtest_portfolio_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("퀀트 봇 시작...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
