@@ -13,6 +13,13 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+# .env 파일 로딩 (로컬 테스트용)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import requests
 import yfinance as yf
 import numpy as np
@@ -371,17 +378,25 @@ def calc_eps_from_financials(t_obj) -> float | None:
 
 
 # ============================================================
-# 한국 주식 데이터 (yfinance + 네이버)
+# 한국 주식 데이터 (KIS API 우선 + yfinance fallback)
 # ============================================================
 
 def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
     try:
+        # ── 1단계: KIS API로 핵심 데이터 수집 ──────────────────
+        kis_data = None
+        try:
+            from kis_api import get_full_stock_data as kis_get
+            kis_data = kis_get(code)
+        except Exception as e:
+            logger.debug(f"KIS API 임포트/호출 실패: {e}")
+
+        # ── 2단계: yfinance로 히스토리 + 보완 데이터 수집 ──────
         ticker = None
         info = None
         hist = None
         t_obj = None
 
-        # 알고 있는 suffix가 있으면 그것 먼저, 없으면 둘 다 시도
         suffixes = [known_suffix] if known_suffix else [".KS", ".KQ"]
         if known_suffix:
             suffixes = [known_suffix, ".KS" if known_suffix == ".KQ" else ".KQ"]
@@ -398,108 +413,121 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
                     break
             except Exception:
                 continue
-        if not info:
+
+        # KIS도 실패하고 yfinance도 실패하면 None
+        if not kis_data and not info:
             return None
 
-        # 병렬로 무거운 데이터 수집 (ThreadPoolExecutor)
+        # ── 3단계: 병렬로 보완 데이터 수집 ─────────────────────
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        def _calc_debt():
-            return calc_debt_to_equity(t_obj)
-        def _calc_op_margin():
-            return calc_ttm_operating_margin(t_obj)
-        def _calc_ev():
-            return calc_ev_ebitda(t_obj, info)
-        def _calc_ic():
-            return calc_interest_coverage(t_obj)
-        def _calc_rev():
-            return calc_revenue_growth(t_obj)
-        def _calc_div():
-            return calc_dividend_growth(t_obj)
-        def _calc_fscore():
-            return calc_piotroski_fscore(t_obj, {"market_cap": info.get("marketCap")})
-        def _calc_naver():
-            pe = info.get("trailingPE")
-            pb = info.get("priceToBook")
-            if pe is None or pb is None:
-                return get_naver_per_pbr(code)
-            return {"per": None, "pbr": None}
-        def _calc_fwd_eps():
-            feps = info.get("forwardEps")
-            if feps is None:
-                return get_wisereport_forward_eps(code)
-            return feps
+        tasks = {}
+        if t_obj:
+            tasks["ev"]      = lambda: calc_ev_ebitda(t_obj, info)
+            tasks["div"]     = lambda: calc_dividend_growth(t_obj)
+            tasks["fscore"]  = lambda: calc_piotroski_fscore(t_obj, {"market_cap": info.get("marketCap") if info else None})
+            tasks["fwd_eps"] = lambda: get_wisereport_forward_eps(code)
 
-        tasks = {
-            "debt": _calc_debt, "op_margin": _calc_op_margin,
-            "ev": _calc_ev, "ic": _calc_ic, "rev": _calc_rev,
-            "div": _calc_div, "fscore": _calc_fscore,
-            "naver": _calc_naver, "fwd_eps": _calc_fwd_eps,
-        }
+        # KIS에 없는 지표만 yfinance로 보완
+        if not kis_data:
+            if t_obj:
+                tasks["debt"]      = lambda: calc_debt_to_equity(t_obj)
+                tasks["op_margin"] = lambda: calc_ttm_operating_margin(t_obj)
+                tasks["ic"]        = lambda: calc_interest_coverage(t_obj)
+                tasks["rev"]       = lambda: calc_revenue_growth(t_obj)
+                tasks["naver"]     = lambda: get_naver_per_pbr(code)
 
         results = {}
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            future_map = {executor.submit(fn): key for key, fn in tasks.items()}
-            for future in as_completed(future_map):
-                key = future_map[future]
-                try:
-                    results[key] = future.result()
-                except Exception as e:
-                    logger.debug(f"병렬 계산 실패 ({key}): {e}")
-                    results[key] = None
+        if tasks:
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                future_map = {executor.submit(fn): key for key, fn in tasks.items()}
+                for future in as_completed(future_map):
+                    key = future_map[future]
+                    try:
+                        results[key] = future.result()
+                    except Exception as e:
+                        logger.debug(f"병렬 계산 실패 ({key}): {e}")
+                        results[key] = None
 
-        debt_ratio = results.get("debt") or info.get("debtToEquity")
-        op_margin = results.get("op_margin") or info.get("operatingMargins")
-        ev_ebitda = results.get("ev")
-        interest_coverage = results.get("ic")
-        revenue_growth = results.get("rev")
+        ev_ebitda      = results.get("ev")
         dividend_growth = results.get("div") or {}
-        fscore_info = results.get("fscore")
+        fscore_info    = results.get("fscore")
+        forward_eps    = results.get("fwd_eps")
 
-        # PER/PBR 네이버 fallback
-        naver = results.get("naver") or {}
-        pe_ratio = info.get("trailingPE") or naver.get("per")
-        pb_ratio = info.get("priceToBook") or naver.get("pbr")
+        # ── 4단계: KIS 데이터 우선, yfinance로 fallback ─────────
+        if kis_data:
+            # KIS API 데이터 사용 (정확한 공식 데이터)
+            price          = kis_data["price"]
+            previous_close = kis_data["previous_close"]
+            market_cap     = kis_data["market_cap"] * 100_000_000 if kis_data["market_cap"] else info.get("marketCap") if info else None  # 억원 → 원
+            pe_ratio       = kis_data["pe_ratio"]
+            pb_ratio       = kis_data["pb_ratio"]
+            eps            = kis_data["eps"]
+            roe            = kis_data["roe"] / 100 if kis_data["roe"] else None  # % → 소수
+            roa            = kis_data["roa"] / 100 if kis_data["roa"] else None
+            op_margin      = kis_data["operating_margin"] / 100 if kis_data["operating_margin"] else None
+            debt_ratio     = kis_data["debt_to_equity"]
+            interest_cov   = kis_data["interest_coverage"]
+            rev_growth     = kis_data["revenue_growth"] / 100 if kis_data["revenue_growth"] else None
+            div_yield      = kis_data["dividend_yield"] / 100 if kis_data["dividend_yield"] else info.get("dividendYield") if info else None
+            logger.info(f"KIS API 사용: {code} 현재가={price:,}원 PER={pe_ratio} ROE={roe}")
+        else:
+            # yfinance fallback
+            logger.info(f"yfinance fallback 사용: {code}")
+            naver      = results.get("naver") or {}
+            price      = info.get("currentPrice") or info.get("regularMarketPrice")
+            previous_close = info.get("previousClose")
+            market_cap = info.get("marketCap")
+            pe_ratio   = info.get("trailingPE") or naver.get("per")
+            pb_ratio   = info.get("priceToBook") or naver.get("pbr")
+            eps        = info.get("trailingEps") or calc_eps_from_financials(t_obj)
+            roe        = info.get("returnOnEquity")
+            roa        = info.get("returnOnAssets")
+            op_margin  = results.get("op_margin") or info.get("operatingMargins")
+            debt_ratio = results.get("debt") or info.get("debtToEquity")
+            interest_cov = results.get("ic")
+            rev_growth = results.get("rev")
+            div_yield  = info.get("dividendYield")
 
-        # EPS
-        eps = info.get("trailingEps")
-        if eps is None and t_obj:
-            eps = calc_eps_from_financials(t_obj)
-            if eps:
-                logger.info(f"EPS 재무제표 계산: {code} = {eps:.2f}")
+        # Forward PE / Forward EPS (KIS 미지원 → yfinance + wisereport)
+        forward_pe  = info.get("forwardPE") if info else None
+        if not forward_eps and info:
+            forward_eps = info.get("forwardEps") or get_wisereport_forward_eps(code)
 
-        # Forward EPS: yfinance → None이면 wisereport 파싱
-        forward_eps = info.get("forwardEps")
-        if forward_eps is None:
-            forward_eps = get_wisereport_forward_eps(code)
+        # PS ratio (KIS 미지원 → yfinance)
+        ps_ratio = info.get("priceToSalesTrailing12Months") if info else None
 
         return {
-            "code": code, "name": name, "ticker": ticker,
-            "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-            "previous_close": info.get("previousClose"),
-            "market_cap": info.get("marketCap"),
+            "code": code, "name": name,
+            "ticker": ticker or f"{code}.KS",
+            "price": price,
+            "previous_close": previous_close,
+            "market_cap": market_cap,
             "pe_ratio": pe_ratio,
-            "forward_pe": info.get("forwardPE"),
+            "forward_pe": forward_pe,
             "eps": eps,
             "forward_eps": forward_eps,
             "pb_ratio": pb_ratio,
-            "ps_ratio": info.get("priceToSalesTrailing12Months"),
+            "ps_ratio": ps_ratio,
             "ev_ebitda": ev_ebitda,
-            "roe": info.get("returnOnEquity"),
-            "roa": info.get("returnOnAssets"),
+            "roe": roe,
+            "roa": roa,
             "operating_margin": op_margin,
             "debt_to_equity": debt_ratio,
-            "interest_coverage": interest_coverage,
-            "revenue_growth": revenue_growth,
-            "dividend_yield": info.get("dividendYield"),
-            "payout_ratio": info.get("payoutRatio"),
+            "interest_coverage": interest_cov,
+            "revenue_growth": rev_growth,
+            "dividend_yield": div_yield,
+            "payout_ratio": info.get("payoutRatio") if info else None,
             "dividend_growth": dividend_growth,
             "fscore_info": fscore_info,
-            "beta": info.get("beta"),
-            "sector": info.get("sector", ""),
-            "industry": info.get("industry", ""),
+            "beta": info.get("beta") if info else None,
+            "sector": info.get("sector", "") if info else "",
+            "industry": info.get("industry", "") if info else "",
             "history": hist,
             "currency": "KRW", "market": "KR",
+            # 수급 정보 (KIS API)
+            "foreigner_net": kis_data.get("foreigner_net") if kis_data else None,
+            "institution_net": kis_data.get("institution_net") if kis_data else None,
         }
     except Exception as e:
         logger.error(f"한국 주식 데이터 실패 ({code}): {e}")
@@ -1596,6 +1624,19 @@ def format_factor_message(data):
             msg += f"   {d}\n"
 
     msg += "\n💡 본 분석은 참고용이며, 투자 결정의 책임은 본인에게 있습니다."
+
+    # 수급 정보 (KIS API 연동 시 표시)
+    foreigner = data.get("foreigner_net")
+    institution = data.get("institution_net")
+    if foreigner is not None or institution is not None:
+        msg += "\n\n👥 수급 (당일)\n"
+        if foreigner is not None:
+            sign = "▲" if foreigner > 0 else "▼"
+            msg += f"   • 외국인: {sign} {abs(foreigner):,}주\n"
+        if institution is not None:
+            sign = "▲" if institution > 0 else "▼"
+            msg += f"   • 기관: {sign} {abs(institution):,}주\n"
+
     return msg
 
 
