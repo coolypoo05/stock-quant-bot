@@ -1144,6 +1144,50 @@ def score_momentum(data):
 
     if not scores:
         return 0, ["데이터 부족"]
+
+    # 7) 외국인/기관 수급 (KIS API 연동 시)
+    foreigner = data.get("foreigner_net")
+    institution = data.get("institution_net")
+    if foreigner is not None or institution is not None:
+        details.append(f"\n👥 외국인/기관 수급")
+
+        fg_str = ""
+        if foreigner is not None:
+            fg_sign = "▲" if foreigner > 0 else "▼"
+            fg_str = f"외국인 {fg_sign}{abs(foreigner):,}주"
+        inst_str = ""
+        if institution is not None:
+            inst_sign = "▲" if institution > 0 else "▼"
+            inst_str = f"기관 {inst_sign}{abs(institution):,}주"
+        if fg_str and inst_str:
+            details.append(f"   • {fg_str} / {inst_str}")
+        elif fg_str:
+            details.append(f"   • {fg_str}")
+        elif inst_str:
+            details.append(f"   • {inst_str}")
+
+        # 수급 점수화
+        if foreigner is not None and institution is not None:
+            if foreigner > 0 and institution > 0:
+                s = 85
+                details.append(f"   • 외국인+기관 동반 순매수 ★")
+            elif foreigner > 0 or institution > 0:
+                s = 65
+                details.append(f"   • 기관/외국인 순매수")
+            elif foreigner < 0 and institution < 0:
+                s = 25
+                details.append(f"   • 외국인+기관 동반 순매도 ⚠️")
+            else:
+                s = 45
+                details.append(f"   • 수급 혼조")
+        elif foreigner is not None:
+            s = 65 if foreigner > 0 else 35
+            details.append(f"   • 외국인 {'순매수' if foreigner > 0 else '순매도'}")
+        else:
+            s = 65 if institution > 0 else 35
+            details.append(f"   • 기관 {'순매수' if institution > 0 else '순매도'}")
+        scores.append(s)
+
     return int(np.mean(scores)), details
 
 
@@ -1624,19 +1668,6 @@ def format_factor_message(data):
             msg += f"   {d}\n"
 
     msg += "\n💡 본 분석은 참고용이며, 투자 결정의 책임은 본인에게 있습니다."
-
-    # 수급 정보 (KIS API 연동 시 표시)
-    foreigner = data.get("foreigner_net")
-    institution = data.get("institution_net")
-    if foreigner is not None or institution is not None:
-        msg += "\n\n👥 수급 (당일)\n"
-        if foreigner is not None:
-            sign = "▲" if foreigner > 0 else "▼"
-            msg += f"   • 외국인: {sign} {abs(foreigner):,}주\n"
-        if institution is not None:
-            sign = "▲" if institution > 0 else "▼"
-            msg += f"   • 기관: {sign} {abs(institution):,}주\n"
-
     return msg
 
 
