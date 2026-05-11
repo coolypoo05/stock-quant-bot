@@ -2301,6 +2301,319 @@ def fetch_stock_quick(item: dict) -> dict | None:
 
 
 # ============================================================
+# 상관계수 분석
+# ============================================================
+
+PERIOD_MAP = {
+    "6m": ("6mo", "6개월"),
+    "1y": ("1y",  "1년"),
+    "3y": ("3y",  "3년"),
+}
+
+
+def fetch_prices_for_corr(query: str, period: str) -> tuple[str, str, pd.Series | None]:
+    """종목 가격 데이터 수집. (ticker, name, prices) 반환."""
+    # 한국 주식
+    result = search_kor_stock(query)
+    if result:
+        code, name, suffix = result
+        ticker = code + suffix
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period=period)
+            if hist is not None and not hist.empty:
+                return ticker, name, hist["Close"].dropna()
+        except Exception:
+            pass
+
+    # 미국 주식
+    if re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
+        ticker = query.upper()
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period=period)
+            info = t.info
+            name = info.get("shortName") or info.get("longName") or ticker
+            if hist is not None and not hist.empty:
+                return ticker, name, hist["Close"].dropna()
+        except Exception:
+            pass
+
+    return query, query, None
+
+
+def run_correlation(queries: list[str], period: str) -> dict | None:
+    """상관계수 분석 실행."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    yf_period, period_label = PERIOD_MAP.get(period, ("1y", "1년"))
+
+    # 병렬로 가격 데이터 수집
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        future_map = {executor.submit(fetch_prices_for_corr, q, yf_period): q for q in queries}
+        for future in as_completed(future_map):
+            q = future_map[future]
+            try:
+                ticker, name, prices = future.result()
+                if prices is not None and len(prices) > 10:
+                    results[q] = {"ticker": ticker, "name": name, "prices": prices}
+            except Exception as e:
+                logger.warning(f"상관계수 데이터 수집 실패 ({q}): {e}")
+
+    if len(results) < 2:
+        return None
+
+    # 일별 수익률 계산
+    names = []
+    returns_list = []
+    prices_list = []
+
+    for q in queries:
+        if q in results:
+            r = results[q]
+            names.append(r["name"])
+            prices_list.append(r["prices"])
+            returns_list.append(r["prices"].pct_change().dropna())
+
+    # 공통 날짜로 정렬
+    common_idx = returns_list[0].index
+    for ret in returns_list[1:]:
+        common_idx = common_idx.intersection(ret.index)
+
+    if len(common_idx) < 20:
+        return None
+
+    aligned_returns = [ret.loc[common_idx] for ret in returns_list]
+    aligned_prices = [p.reindex(common_idx).ffill() for p in prices_list]
+
+    # 상관계수 행렬
+    df_returns = pd.DataFrame({names[i]: aligned_returns[i] for i in range(len(names))})
+    corr_matrix = df_returns.corr()
+
+    # 개별 수익률
+    individual_returns = []
+    for i, name in enumerate(names):
+        p = aligned_prices[i]
+        ret = ((float(p.iloc[-1]) - float(p.iloc[0])) / float(p.iloc[0])) * 100
+        individual_returns.append((name, ret))
+
+    return {
+        "names": names,
+        "period_label": period_label,
+        "corr_matrix": corr_matrix,
+        "aligned_prices": aligned_prices,
+        "individual_returns": individual_returns,
+        "start_date": str(common_idx[0].date()),
+        "end_date": str(common_idx[-1].date()),
+        "n_days": len(common_idx),
+    }
+
+
+def create_correlation_chart(result: dict) -> bytes:
+    """수익률 비교 차트 + 상관계수 히트맵."""
+    names = result["names"]
+    n = len(names)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    try:
+        plt.rcParams["axes.unicode_minus"] = False
+    except Exception:
+        pass
+
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f"]
+
+    # 왼쪽: 정규화 수익률 비교
+    ax1 = axes[0]
+    for i, (name, prices) in enumerate(zip(names, result["aligned_prices"])):
+        norm = (prices / prices.iloc[0]) * 100
+        ax1.plot(norm.index, norm.values, label=name,
+                 color=colors[i % len(colors)], linewidth=2)
+
+    ax1.set_title(f"수익률 비교 ({result['period_label']})", fontsize=12, fontweight="bold")
+    ax1.set_ylabel("정규화 수익률 (시작 = 100)")
+    ax1.legend(loc="upper left", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    ax1.axhline(100, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+
+    # 오른쪽: 상관계수 히트맵
+    ax2 = axes[1]
+    corr = result["corr_matrix"].values
+    im = ax2.imshow(corr, cmap="RdYlGn", vmin=-1, vmax=1, aspect="auto")
+    plt.colorbar(im, ax=ax2, shrink=0.8)
+
+    ax2.set_xticks(range(n))
+    ax2.set_yticks(range(n))
+
+    # 이름이 길면 줄임
+    short_names = [name[:8] + ".." if len(name) > 8 else name for name in names]
+    ax2.set_xticklabels(short_names, rotation=30, ha="right", fontsize=9)
+    ax2.set_yticklabels(short_names, fontsize=9)
+    ax2.set_title("상관계수 히트맵", fontsize=12, fontweight="bold")
+
+    # 각 셀에 상관계수 값 표시
+    for i in range(n):
+        for j in range(n):
+            val = corr[i][j]
+            color = "black" if 0.3 < abs(val) < 0.8 else "white"
+            ax2.text(j, i, f"{val:.2f}", ha="center", va="center",
+                     fontsize=10, fontweight="bold", color=color)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=100, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+    return buf.read()
+
+
+def format_correlation_message(result: dict) -> str:
+    """상관계수 분석 결과 메시지."""
+    names = result["names"]
+    corr = result["corr_matrix"]
+
+    msg = "📊 상관계수 분석\n"
+    msg += "━━━━━━━━━━━━━━━\n"
+    msg += f"📅 기간: {result['period_label']} ({result['start_date']} ~ {result['end_date']})\n"
+    msg += f"   ({result['n_days']}거래일 기준)\n\n"
+
+    # 개별 수익률
+    msg += "📈 기간 수익률\n"
+    for name, ret in result["individual_returns"]:
+        sign = "+" if ret >= 0 else ""
+        msg += f"   • {name}: {sign}{ret:.1f}%\n"
+    msg += "\n"
+
+    # 상관계수 쌍별 해석
+    msg += "🔗 상관계수\n"
+    pairs = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            val = float(corr.iloc[i, j])
+            pairs.append((names[i], names[j], val))
+
+    for n1, n2, val in pairs:
+        if val >= 0.8:
+            grade = "매우 높음 🔴"
+            comment = "거의 같이 움직임 (분산 효과 낮음)"
+        elif val >= 0.6:
+            grade = "높음 🟠"
+            comment = "유사한 움직임"
+        elif val >= 0.4:
+            grade = "보통 🟡"
+            comment = "어느 정도 연동"
+        elif val >= 0.2:
+            grade = "낮음 🟢"
+            comment = "독립적 움직임"
+        elif val >= -0.2:
+            grade = "매우 낮음 🟢"
+            comment = "거의 무관"
+        else:
+            grade = "음의 상관 🟢"
+            comment = "반대로 움직임 (분산 효과 높음)"
+
+        msg += f"   • {n1} ↔ {n2}\n"
+        msg += f"     상관계수: {val:.3f} ({grade})\n"
+        msg += f"     → {comment}\n"
+
+    # 포트폴리오 분산 효과 평가
+    avg_corr = sum(p[2] for p in pairs) / len(pairs) if pairs else 0
+    msg += "\n⚖️ 포트폴리오 분산 효과\n"
+    if avg_corr >= 0.7:
+        msg += f"   평균 상관계수: {avg_corr:.2f} → 분산 효과 낮음 ⚠️\n"
+        msg += "   💡 상관관계 낮은 종목 추가를 권장해요"
+    elif avg_corr >= 0.4:
+        msg += f"   평균 상관계수: {avg_corr:.2f} → 분산 효과 보통 🟡\n"
+        msg += "   💡 추가 분산 투자 고려해보세요"
+    else:
+        msg += f"   평균 상관계수: {avg_corr:.2f} → 분산 효과 우수 🟢\n"
+        msg += "   💡 잘 분산된 포트폴리오예요"
+
+    msg += "\n\n💡 상관계수는 과거 데이터 기준이며 미래를 보장하지 않습니다."
+    return msg
+
+
+async def corr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/corr 삼성전자 SK하이닉스 AAPL [6m/1y/3y]"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "📊 상관계수 분석 사용법:\n"
+            "/corr <종목1> <종목2> ... [기간]\n\n"
+            "기간 옵션:\n"
+            "  6m  → 6개월\n"
+            "  1y  → 1년 (기본값)\n"
+            "  3y  → 3년\n\n"
+            "예시:\n"
+            "  /corr 삼성전자 SK하이닉스\n"
+            "  /corr 삼성전자 SK하이닉스 NAVER 1y\n"
+            "  /corr AAPL MSFT GOOGL 3y\n"
+            "  /corr 삼성전자 AAPL 1y\n\n"
+            "⚠️ 최대 5개 종목까지 가능"
+        )
+        return
+
+    args = context.args
+
+    # 기간 파싱 (마지막 인자가 6m/1y/3y이면 기간으로 처리)
+    period = "1y"
+    if args[-1].lower() in PERIOD_MAP:
+        period = args[-1].lower()
+        args = args[:-1]
+
+    if len(args) < 2:
+        await update.message.reply_text("❌ 종목을 2개 이상 입력해주세요.")
+        return
+
+    if len(args) > 5:
+        await update.message.reply_text("❌ 최대 5개 종목까지 가능해요.")
+        return
+
+    _, period_label = PERIOD_MAP[period]
+    await update.message.reply_text(
+        f"⏳ 상관계수 분석 중...\n"
+        f"종목: {', '.join(args)}\n"
+        f"기간: {period_label}"
+    )
+
+    chat_id = update.effective_chat.id
+
+    async def run_corr():
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, run_correlation, list(args), period
+            )
+
+            if not result:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ 데이터를 가져올 수 없어요.\n2개 이상 종목의 데이터가 필요해요."
+                )
+                return
+
+            # 차트 전송
+            chart_bytes = create_correlation_chart(result)
+            if chart_bytes:
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=chart_bytes,
+                    caption=f"📊 상관계수 분석 ({period_label})"
+                )
+
+            # 텍스트 결과
+            msg = format_correlation_message(result)
+            await context.bot.send_message(
+                chat_id=chat_id, text=msg, disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.exception("상관계수 분석 실패")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 오류: {e}")
+
+    asyncio.create_task(run_corr())
+
+
+# ============================================================
 # 텔레그램 핸들러
 # ============================================================
 
@@ -2337,12 +2650,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /screen 만 입력하면 도움말\n\n"
         "📊 백테스팅:\n"
         "  /backtest <종목> <시작일> [종료일]\n"
-        "  예) /backtest 삼성전자 2020-01-01\n"
-        "      /backtest AAPL 2018-06-15\n\n"
+        "  예) /backtest 삼성전자 2020-01-01\n\n"
         "💼 포트폴리오 백테스팅:\n"
-        "  /backtest_portfolio <종목:비율> ... <시작일> [초기금액]\n"
-        "  예) /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01 10000\n"
-        "      /backtest_portfolio 삼성전자:4 SK하이닉스:3 2020-01-01\n\n"
+        "  /backtest_portfolio <종목:비율> ... <시작일>\n"
+        "  예) /backtest_portfolio AAPL:4 MSFT:3 GOOGL:3 2020-01-01\n\n"
+        "🔗 상관계수 분석:\n"
+        "  /corr <종목1> <종목2> ... [6m/1y/3y]\n"
+        "  예) /corr 삼성전자 SK하이닉스 1y\n"
+        "      /corr AAPL MSFT GOOGL 3y\n\n"
         "또는 종목명/티커만 입력해도 자동 분석합니다.\n\n"
         "⚙️ 점수 산출 방식:\n"
         "  • 밸류40 + 퀄리티40 + 모멘텀20\n"
@@ -3130,6 +3445,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stop_screen", stop_screen_cmd))
     app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(CommandHandler("backtest_portfolio", backtest_portfolio_cmd))
+    app.add_handler(CommandHandler("corr", corr_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("퀀트 봇 시작...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
