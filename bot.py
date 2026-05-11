@@ -2397,6 +2397,11 @@ def run_correlation(queries: list[str], period: str) -> dict | None:
             returns_list.append(r["prices"].pct_change().dropna())
 
     # 공통 날짜로 정렬
+    # 타임존 제거 후 날짜만 사용 (한국/미국 혼용 시 타임존 차이 해결)
+    for i in range(len(returns_list)):
+        returns_list[i].index = pd.to_datetime(returns_list[i].index).tz_localize(None).normalize()
+        prices_list[i].index = pd.to_datetime(prices_list[i].index).tz_localize(None).normalize()
+
     common_idx = returns_list[0].index
     for ret in returns_list[1:]:
         common_idx = common_idx.intersection(ret.index)
