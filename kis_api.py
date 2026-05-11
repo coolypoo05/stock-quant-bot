@@ -27,7 +27,13 @@ logger = logging.getLogger(__name__)
 
 APPKEY    = os.environ.get("KIS_APPKEY", "")
 APPSECRET = os.environ.get("KIS_APPSECRET", "")
-ACCOUNT   = os.environ.get("KIS_ACCOUNT", "")  # 예: 50123456-01
+ACCOUNT   = os.environ.get("KIS_ACCOUNT", "")
+
+# 환경변수 로딩 확인
+if APPKEY:
+    logger.info(f"KIS API 키 로딩 성공 (appkey 앞 4자리: {APPKEY[:4]}...)")
+else:
+    logger.warning("KIS_APPKEY 환경변수가 비어있습니다.")
 
 # 모의투자 도메인
 BASE_URL = "https://openapivts.koreainvestment.com:29443"
