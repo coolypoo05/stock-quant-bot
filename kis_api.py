@@ -12,10 +12,10 @@ import logging
 import requests
 from datetime import datetime, timedelta
 
-# .env 파일 로딩 (로컬 테스트용)
+# .env 파일 로딩 (로컬 테스트용, 이미 설정된 환경변수는 덮어쓰지 않음)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=False)  # Railway 환경변수 우선
 except ImportError:
     pass
 
@@ -30,6 +30,8 @@ APPSECRET = os.environ.get("KIS_APPSECRET", "")
 ACCOUNT   = os.environ.get("KIS_ACCOUNT", "")
 
 # 환경변수 로딩 확인
+all_kis_keys = [k for k in os.environ.keys() if "KIS" in k.upper()]
+logger.info(f"KIS 관련 환경변수 목록: {all_kis_keys}")
 if APPKEY:
     logger.info(f"KIS API 키 로딩 성공 (appkey 앞 4자리: {APPKEY[:4]}...)")
 else:
