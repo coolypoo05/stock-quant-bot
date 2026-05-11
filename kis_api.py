@@ -12,13 +12,6 @@ import logging
 import requests
 from datetime import datetime, timedelta
 
-# .env 파일 로딩 (로컬 테스트용, 이미 설정된 환경변수는 덮어쓰지 않음)
-try:
-    from dotenv import load_dotenv
-    load_dotenv(override=False)  # Railway 환경변수 우선
-except ImportError:
-    pass
-
 logger = logging.getLogger(__name__)
 
 # ============================================================
