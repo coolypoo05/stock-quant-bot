@@ -13,10 +13,10 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# .env 파일 로딩 (로컬 테스트용)
+# .env 파일 로딩 (로컬 테스트용, Railway 환경변수는 덮어쓰지 않음)
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=False)
 except ImportError:
     pass
 
@@ -423,19 +423,19 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
 
         tasks = {}
         if t_obj:
-            tasks["ev"]      = lambda: calc_ev_ebitda(t_obj, info)
-            tasks["div"]     = lambda: calc_dividend_growth(t_obj)
-            tasks["fscore"]  = lambda: calc_piotroski_fscore(t_obj, {"market_cap": info.get("marketCap") if info else None})
-            tasks["fwd_eps"] = lambda: get_wisereport_forward_eps(code)
+            tasks["ev"]       = lambda: calc_ev_ebitda(t_obj, info)
+            tasks["div"]      = lambda: calc_dividend_growth(t_obj)
+            tasks["fscore"]   = lambda: calc_piotroski_fscore(t_obj, {"market_cap": info.get("marketCap") if info else None})
+            tasks["fwd_eps"]  = lambda: get_wisereport_forward_eps(code)
+            tasks["op_margin"] = lambda: calc_ttm_operating_margin(t_obj)
+            tasks["ic"]        = lambda: calc_interest_coverage(t_obj)
 
         # KIS에 없는 지표만 yfinance로 보완
         if not kis_data:
             if t_obj:
-                tasks["debt"]      = lambda: calc_debt_to_equity(t_obj)
-                tasks["op_margin"] = lambda: calc_ttm_operating_margin(t_obj)
-                tasks["ic"]        = lambda: calc_interest_coverage(t_obj)
-                tasks["rev"]       = lambda: calc_revenue_growth(t_obj)
-                tasks["naver"]     = lambda: get_naver_per_pbr(code)
+                tasks["debt"]  = lambda: calc_debt_to_equity(t_obj)
+                tasks["rev"]   = lambda: calc_revenue_growth(t_obj)
+                tasks["naver"] = lambda: get_naver_per_pbr(code)
 
         results = {}
         if tasks:
@@ -456,20 +456,23 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
 
         # ── 4단계: KIS 데이터 우선, yfinance로 fallback ─────────
         if kis_data:
-            # KIS API 데이터 사용 (정확한 공식 데이터)
+            # KIS API 데이터 사용
             price          = kis_data["price"]
             previous_close = kis_data["previous_close"]
-            market_cap     = kis_data["market_cap"] * 100_000_000 if kis_data["market_cap"] else info.get("marketCap") if info else None  # 억원 → 원
+            market_cap     = kis_data["market_cap"] * 100_000_000 if kis_data["market_cap"] else info.get("marketCap") if info else None
             pe_ratio       = kis_data["pe_ratio"]
             pb_ratio       = kis_data["pb_ratio"]
-            eps            = kis_data["eps"]
-            roe            = kis_data["roe"] / 100 if kis_data["roe"] else None  # % → 소수
-            roa            = kis_data["roa"] / 100 if kis_data["roa"] else None
-            op_margin      = kis_data["operating_margin"] / 100 if kis_data["operating_margin"] else None
+            eps            = kis_data["eps"] or (info.get("trailingEps") if info else None)
+            roe            = kis_data["roe"] / 100 if kis_data["roe"] else None
             debt_ratio     = kis_data["debt_to_equity"]
-            interest_cov   = kis_data["interest_coverage"]
             rev_growth     = kis_data["revenue_growth"] / 100 if kis_data["revenue_growth"] else None
-            div_yield      = kis_data["dividend_yield"] / 100 if kis_data["dividend_yield"] else info.get("dividendYield") if info else None
+            div_yield      = kis_data["dividend_yield"] / 100 if kis_data["dividend_yield"] else (info.get("dividendYield") if info else None)
+
+            # KIS 미제공 → yfinance fallback
+            roa       = info.get("returnOnAssets") if info else None
+            op_margin = results.get("op_margin") or (info.get("operatingMargins") if info else None)
+            interest_cov = results.get("ic") or (info.get("operatingIncome", 0) / info.get("interestExpense", 1) if info and info.get("interestExpense") else None)
+
             logger.info(f"KIS API 사용: {code} 현재가={price:,}원 PER={pe_ratio} ROE={roe}")
         else:
             # yfinance fallback

@@ -12,6 +12,13 @@ import logging
 import requests
 from datetime import datetime, timedelta
 
+# .env 파일 로딩 (로컬 테스트용)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -199,16 +206,18 @@ def get_financial_ratio(code: str) -> dict | None:
         # 가장 최근 연도 데이터
         output = output_list[0]
         return {
-            "stac_yymm": output.get("stac_yymm", ""),          # 결산 연월
-            "roe": float(output.get("roe_val", 0) or 0),        # ROE (%)
-            "roa": float(output.get("roa_val", 0) or 0),        # ROA (%)
-            "operating_margin": float(output.get("bstp_enpn_rate", 0) or 0),  # 영업이익률 (%)
-            "net_margin": float(output.get("net_prft_rate", 0) or 0),         # 순이익률 (%)
-            "debt_ratio": float(output.get("lblt_rate", 0) or 0),             # 부채비율 (%)
-            "current_ratio": float(output.get("crnt_rate", 0) or 0),          # 유동비율 (%)
-            "interest_coverage": float(output.get("int_covr_rate", 0) or 0),  # 이자보상배율
-            "revenue_growth": float(output.get("sles_icrs_rate", 0) or 0),    # 매출성장률 (%)
-            "op_income_growth": float(output.get("bstp_enpn_icrs_rate", 0) or 0),  # 영업이익성장률
+            "stac_yymm": output.get("stac_yymm", ""),           # 결산 연월
+            "roe": float(output.get("roe_val", 0) or 0),         # ROE (%)
+            "roa": None,                                          # KIS 미제공 → yfinance fallback
+            "operating_margin": None,                            # KIS 미제공 → yfinance fallback
+            "net_margin": None,                                   # KIS 미제공 → yfinance fallback
+            "debt_ratio": float(output.get("lblt_rate", 0) or 0),  # 부채비율 (%)
+            "current_ratio": None,                               # KIS 미제공 → yfinance fallback
+            "interest_coverage": None,                           # KIS 미제공 → yfinance fallback
+            "revenue_growth": float(output.get("grs", 0) or 0), # 매출성장률 (%)
+            "op_income_growth": float(output.get("bsop_prfi_inrt", 0) or 0),  # 영업이익성장률
+            "eps": float(output.get("eps", 0) or 0),             # EPS
+            "bps": float(output.get("bps", 0) or 0),             # BPS
         }
     except Exception as e:
         logger.error(f"KIS 재무비율 조회 오류 ({code}): {e}")
