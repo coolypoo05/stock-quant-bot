@@ -2313,7 +2313,35 @@ PERIOD_MAP = {
 
 def fetch_prices_for_corr(query: str, period: str) -> tuple[str, str, pd.Series | None]:
     """종목 가격 데이터 수집. (ticker, name, prices) 반환."""
-    # 한국 주식
+    # 숫자 6자리 → 한국 주식만 시도
+    if re.fullmatch(r"\d{6}", query):
+        result = search_kor_stock(query)
+        if result:
+            code, name, suffix = result
+            ticker = code + suffix
+            try:
+                t = yf.Ticker(ticker)
+                hist = t.history(period=period)
+                if hist is not None and not hist.empty:
+                    return ticker, name, hist["Close"].dropna()
+            except Exception:
+                pass
+        return query, query, None
+
+    # 영문 → 미국 주식 우선 시도
+    if re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
+        ticker = query.upper()
+        try:
+            t = yf.Ticker(ticker)
+            hist = t.history(period=period)
+            if hist is not None and not hist.empty:
+                info = t.info or {}
+                name = info.get("shortName") or info.get("longName") or ticker
+                return ticker, name, hist["Close"].dropna()
+        except Exception:
+            pass
+
+    # 한글 또는 영문 검색 실패 → 한국 주식 STOCK_MAP 검색
     result = search_kor_stock(query)
     if result:
         code, name, suffix = result
@@ -2321,19 +2349,6 @@ def fetch_prices_for_corr(query: str, period: str) -> tuple[str, str, pd.Series 
         try:
             t = yf.Ticker(ticker)
             hist = t.history(period=period)
-            if hist is not None and not hist.empty:
-                return ticker, name, hist["Close"].dropna()
-        except Exception:
-            pass
-
-    # 미국 주식
-    if re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
-        ticker = query.upper()
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period=period)
-            info = t.info
-            name = info.get("shortName") or info.get("longName") or ticker
             if hist is not None and not hist.empty:
                 return ticker, name, hist["Close"].dropna()
         except Exception:
