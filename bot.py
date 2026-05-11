@@ -2313,6 +2313,11 @@ PERIOD_MAP = {
 
 def fetch_prices_for_corr(query: str, period: str) -> tuple[str, str, pd.Series | None]:
     """종목 가격 데이터 수집. (ticker, name, prices) 반환."""
+    # STOCK_MAP 로딩 확인
+    global STOCK_MAP
+    if not STOCK_MAP:
+        load_stock_map()
+
     # 숫자 6자리 → 한국 주식만 시도
     if re.fullmatch(r"\d{6}", query):
         result = search_kor_stock(query)
