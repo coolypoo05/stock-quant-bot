@@ -8,8 +8,10 @@ import os
 import re
 import io
 import gc
+import time
 import asyncio
 import logging
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -3022,7 +3024,6 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             logger.error(f"업종 캐시 갱신 실패: {e}")
 
-    import threading
     threading.Thread(target=_build, daemon=True).start()
 
 
@@ -3930,7 +3931,6 @@ def main() -> None:
     load_screening_universe()
 
     # 업종 캐시 백그라운드 빌드 (봇 시작 직후 비동기로)
-    import threading
     def _build_cache():
         try:
             build_sector_cache()
