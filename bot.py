@@ -1670,6 +1670,15 @@ def format_factor_message(data):
         for d in fscore_details:
             msg += f"   {d}\n"
 
+    # 업종 상대평가 (캐시 있을 때만)
+    sector = data.get("sector", "")
+    if sector and SECTOR_CACHE:
+        sector_lines = get_sector_comparison(sector, data)
+        if sector_lines:
+            msg += "\n"
+            for line in sector_lines:
+                msg += f"{line}\n"
+
     msg += "\n💡 본 분석은 참고용이며, 투자 결정의 책임은 본인에게 있습니다."
     return msg
 
@@ -2021,6 +2030,144 @@ def process_backtest(query: str, start_date: str, end_date: str = None) -> tuple
 SCREENING_UNIVERSE = []  # [{"code", "name", "suffix", "market"}]
 ACTIVE_SCREENINGS = {}   # {chat_id: {"cancel": False}}
 
+# ============================================================
+# 업종 평균 캐시
+# ============================================================
+
+SECTOR_CACHE = {}  # {"Technology": {"per": 18.2, "pbr": 2.8, "roe": 14.5, ...}}
+SECTOR_CACHE_DATE = None  # 마지막 갱신 날짜
+
+# 영문 sector → 한글 매핑
+SECTOR_KO = {
+    "Technology":             "기술",
+    "Financial Services":     "금융",
+    "Healthcare":             "헬스케어",
+    "Consumer Cyclical":      "경기소비재",
+    "Consumer Defensive":     "필수소비재",
+    "Industrials":            "산업재",
+    "Energy":                 "에너지",
+    "Basic Materials":        "소재",
+    "Communication Services": "커뮤니케이션",
+    "Real Estate":            "부동산",
+    "Utilities":              "유틸리티",
+}
+
+
+def build_sector_cache():
+    """스크리닝 유니버스에서 업종별 평균 지표 계산."""
+    global SECTOR_CACHE, SECTOR_CACHE_DATE
+
+    if not SCREENING_UNIVERSE:
+        logger.warning("스크리닝 유니버스가 비어있어 업종 캐시 생성 불가")
+        return
+
+    logger.info("업종 평균 캐시 계산 중... (시간 소요)")
+    sector_data = {}  # {sector: [{"per", "pbr", "roe", ...}]}
+
+    for item in SCREENING_UNIVERSE:
+        try:
+            data = fetch_stock_quick(item)
+            if not data or not data.get("sector"):
+                continue
+            sector = data["sector"]
+            if sector not in sector_data:
+                sector_data[sector] = []
+            sector_data[sector].append(data)
+            time.sleep(0.2)
+        except Exception:
+            continue
+
+    # 업종별 평균 계산
+    cache = {}
+    for sector, items in sector_data.items():
+        def avg(key):
+            vals = [d[key] for d in items if d.get(key) and d[key] > 0]
+            return round(sum(vals) / len(vals), 2) if vals else None
+
+        cache[sector] = {
+            "per":              avg("pe_ratio"),
+            "pbr":              avg("pb_ratio"),
+            "roe":              avg("roe"),
+            "roa":              avg("roa"),
+            "operating_margin": avg("operating_margin"),
+            "debt_to_equity":   avg("debt_to_equity"),
+            "dividend_yield":   avg("dividend_yield"),
+            "count":            len(items),
+            "ko_name":          SECTOR_KO.get(sector, sector),
+        }
+
+    SECTOR_CACHE = cache
+    SECTOR_CACHE_DATE = datetime.now().strftime("%Y-%m-%d")
+    logger.info(f"업종 캐시 완료: {len(cache)}개 업종, {sum(v['count'] for v in cache.values())}개 종목")
+
+
+def get_sector_comparison(sector: str, data: dict) -> list[str]:
+    """업종 평균 대비 비교 텍스트 반환."""
+    if not SECTOR_CACHE or sector not in SECTOR_CACHE:
+        return []
+
+    avg = SECTOR_CACHE[sector]
+    ko_name = avg.get("ko_name", sector)
+    lines = [f"📊 업종 상대평가 ({ko_name} 업종 {avg['count']}개사 평균)"]
+
+    def compare(label, val, avg_val, lower_is_better=False):
+        if val is None or avg_val is None or avg_val == 0:
+            return None
+        diff = ((val - avg_val) / avg_val) * 100
+        if lower_is_better:
+            if diff < -20:
+                grade = "★★★ 매우 저평가"
+            elif diff < -5:
+                grade = "★★ 저평가"
+            elif diff < 5:
+                grade = "★ 적정"
+            elif diff < 20:
+                grade = "고평가"
+            else:
+                grade = "⚠️ 매우 고평가"
+        else:
+            if diff > 20:
+                grade = "★★★ 우수"
+            elif diff > 5:
+                grade = "★★ 양호"
+            elif diff > -5:
+                grade = "★ 적정"
+            elif diff > -20:
+                grade = "하회"
+            else:
+                grade = "⚠️ 크게 하회"
+
+        sign = "+" if diff >= 0 else ""
+        return f"   • {label}: {val:.1f} vs 평균 {avg_val:.1f} ({sign}{diff:.0f}%) → {grade}"
+
+    # PER (낮을수록 저평가)
+    line = compare("PER", data.get("pe_ratio"), avg.get("per"), lower_is_better=True)
+    if line:
+        lines.append(line)
+
+    # PBR (낮을수록 저평가)
+    line = compare("PBR", data.get("pb_ratio"), avg.get("pbr"), lower_is_better=True)
+    if line:
+        lines.append(line)
+
+    # ROE (높을수록 우수)
+    roe = data.get("roe")
+    if roe and roe < 1:
+        roe = roe * 100
+    line = compare("ROE", roe, avg.get("roe"), lower_is_better=False)
+    if line:
+        lines.append(line)
+
+    # 영업이익률 (높을수록 우수)
+    op = data.get("operating_margin")
+    if op and op < 1:
+        op = op * 100
+    line = compare("영업이익률", op, avg.get("operating_margin"), lower_is_better=False)
+    if line:
+        lines.append(line)
+
+    return lines if len(lines) > 1 else []
+
 
 def load_screening_universe():
     """코스피200 + 코스닥150(대형주) + S&P500 로딩."""
@@ -2295,6 +2442,9 @@ def fetch_stock_quick(item: dict) -> dict | None:
             # 성장 (% 변환)
             "revenue_growth": pct(info.get("revenueGrowth")),
             "earnings_growth": pct(info.get("earningsGrowth")),
+            # 업종 (상대평가용)
+            "sector": info.get("sector", "") or "",
+            "industry": info.get("industry", "") or "",
         }
     except Exception:
         return None
@@ -2559,6 +2709,34 @@ def format_correlation_message(result: dict) -> str:
     return msg
 
 
+async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """업종 캐시 수동 갱신."""
+    await update.message.reply_text(
+        "⏳ 업종 평균 캐시 갱신 시작!\n"
+        f"종목 수: {len(SCREENING_UNIVERSE)}개\n"
+        "약 15~30분 소요됩니다. 완료 시 알림드려요."
+    )
+    chat_id = update.effective_chat.id
+
+    def _build():
+        try:
+            build_sector_cache()
+            asyncio.run_coroutine_threadsafe(
+                context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"✅ 업종 캐시 갱신 완료!\n"
+                         f"업종 수: {len(SECTOR_CACHE)}개\n"
+                         f"갱신일: {SECTOR_CACHE_DATE}"
+                ),
+                asyncio.get_event_loop()
+            )
+        except Exception as e:
+            logger.error(f"업종 캐시 갱신 실패: {e}")
+
+    import threading
+    threading.Thread(target=_build, daemon=True).start()
+
+
 async def corr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/corr 삼성전자 SK하이닉스 AAPL [6m/1y/3y]"""
     if not context.args or len(context.args) < 2:
@@ -2683,6 +2861,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /corr <종목1> <종목2> ... [6m/1y/3y]\n"
         "  예) /corr 삼성전자 SK하이닉스 1y\n"
         "      /corr AAPL MSFT GOOGL 3y\n\n"
+        "🏭 업종 상대평가:\n"
+        "  /sector_update  → 업종 캐시 수동 갱신\n"
+        "  (팩터 분석 시 자동 표시)\n\n"
         "또는 종목명/티커만 입력해도 자동 분석합니다.\n\n"
         "⚙️ 점수 산출 방식:\n"
         "  • 밸류40 + 퀄리티40 + 모멘텀20\n"
@@ -3454,6 +3635,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def main() -> None:
     load_stock_map()
     load_screening_universe()
+
+    # 업종 캐시 백그라운드 빌드 (봇 시작 직후 비동기로)
+    import threading
+    def _build_cache():
+        try:
+            build_sector_cache()
+        except Exception as e:
+            logger.error(f"업종 캐시 빌드 실패: {e}")
+    threading.Thread(target=_build_cache, daemon=True).start()
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -3471,7 +3662,15 @@ def main() -> None:
     app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(CommandHandler("backtest_portfolio", backtest_portfolio_cmd))
     app.add_handler(CommandHandler("corr", corr_cmd))
+    app.add_handler(CommandHandler("sector_update", sector_update_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # 매일 새벽 6시 업종 캐시 갱신
+    app.job_queue.run_daily(
+        lambda ctx: threading.Thread(target=_build_cache, daemon=True).start(),
+        time=datetime.strptime("06:00", "%H:%M").time().replace(tzinfo=ZoneInfo("Asia/Seoul")),
+    )
+
     logger.info("퀀트 봇 시작...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
