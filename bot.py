@@ -2709,6 +2709,295 @@ def format_correlation_message(result: dict) -> str:
     return msg
 
 
+# ============================================================
+# 팩터 비교
+# ============================================================
+
+def format_compare_message(q1: str, q2: str) -> str:
+    """두 종목 팩터 비교 메시지 생성."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # 두 종목 병렬 조회
+    results = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_map = {
+            executor.submit(process_factor, q1): q1,
+            executor.submit(process_factor, q2): q2,
+        }
+        for future in as_completed(future_map):
+            q = future_map[future]
+            try:
+                results[q] = future.result()
+            except Exception as e:
+                logger.warning(f"팩터 비교 조회 실패 ({q}): {e}")
+                results[q] = None
+
+    msg1 = results.get(q1)
+    msg2 = results.get(q2)
+
+    if not msg1 or not msg2:
+        failed = q1 if not msg1 else q2
+        return f"❌ '{failed}' 종목 데이터를 가져올 수 없어요."
+
+    # process_factor는 메시지 문자열을 반환하므로
+    # 데이터를 직접 가져오도록 별도 처리
+    return None  # 아래 compare_cmd에서 직접 처리
+
+
+def run_compare(q1: str, q2: str) -> tuple:
+    """두 종목 팩터 데이터 병렬 조회. (data1, data2) 반환."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def fetch(query):
+        query = query.strip()
+        if re.fullmatch(r"[A-Za-z.\-]{1,10}", query):
+            data = get_us_stock_data(query.upper())
+            if data:
+                return data
+        result = search_kor_stock(query)
+        if result:
+            code, name, suffix = result
+            return get_kor_stock_data(code, name, suffix)
+        return None
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_map = {
+            executor.submit(fetch, q1): "d1",
+            executor.submit(fetch, q2): "d2",
+        }
+        for future in as_completed(future_map):
+            key = future_map[future]
+            try:
+                results[key] = future.result()
+            except Exception:
+                results[key] = None
+
+    return results.get("d1"), results.get("d2")
+
+
+def format_compare_result(data1: dict, data2: dict) -> str:
+    """팩터 비교 결과 메시지 생성."""
+    name1 = data1.get("name", "종목1")
+    name2 = data2.get("name", "종목2")
+
+    # 점수 계산
+    v1, _ = score_value(data1)
+    q1, _ = score_quality(data1)
+    m1, _ = score_momentum(data1)
+    total1 = calc_weighted_overall(v1, q1, m1)
+    penalty1, _ = check_risk_warnings(data1)
+    final1 = max(0, total1 - penalty1)
+
+    v2, _ = score_value(data2)
+    q2, _ = score_quality(data2)
+    m2, _ = score_momentum(data2)
+    total2 = calc_weighted_overall(v2, q2, m2)
+    penalty2, _ = check_risk_warnings(data2)
+    final2 = max(0, total2 - penalty2)
+
+    # 이름 길이 맞추기
+    n1 = name1[:8]
+    n2 = name2[:8]
+    col_w = max(len(n1), len(n2), 6) + 2
+
+    def winner(v_better, v_worse):
+        """더 좋은 쪽 반환."""
+        return "🏆" if v_better else "  "
+
+    def fmt_val(val, is_pct=False, decimals=1):
+        if val is None:
+            return "N/A"
+        if is_pct:
+            return f"{val*100:.{decimals}f}%" if abs(val) < 10 else f"{val:.{decimals}f}%"
+        return f"{val:.{decimals}f}"
+
+    wins1 = 0
+    wins2 = 0
+    rows = []
+
+    def add_row(label, val1, val2, lower_better=False):
+        nonlocal wins1, wins2
+        if val1 is None and val2 is None:
+            return
+        v1_str = "N/A" if val1 is None else f"{val1:.2f}"
+        v2_str = "N/A" if val2 is None else f"{val2:.2f}"
+
+        if val1 is not None and val2 is not None:
+            if lower_better:
+                w1 = val1 < val2
+            else:
+                w1 = val1 > val2
+            w2 = not w1
+            if abs(val1 - val2) < 0.01:  # 거의 동일
+                w1 = w2 = False
+        else:
+            w1 = w2 = False
+
+        if w1:
+            wins1 += 1
+        if w2:
+            wins2 += 1
+
+        w1_str = "🏆" if w1 else "  "
+        w2_str = "🏆" if w2 else "  "
+        rows.append(f"  {label:<12} {v1_str:>8} {w1_str}  {v2_str:>8} {w2_str}")
+
+    msg = f"📊 팩터 비교\n"
+    msg += f"{'':>14} {n1:>{col_w}} {'':>3} {n2:>{col_w}}\n"
+    msg += "━━━━━━━━━━━━━━━\n"
+
+    # 밸류
+    msg += "💰 밸류\n"
+    rows.clear()
+    add_row("PER",        data1.get("pe_ratio"),         data2.get("pe_ratio"),         lower_better=True)
+    add_row("Forward PER",data1.get("forward_pe"),       data2.get("forward_pe"),       lower_better=True)
+    add_row("PBR",        data1.get("pb_ratio"),         data2.get("pb_ratio"),         lower_better=True)
+    add_row("PSR",        data1.get("ps_ratio"),         data2.get("ps_ratio"),         lower_better=True)
+    add_row("EV/EBITDA",  data1.get("ev_ebitda"),        data2.get("ev_ebitda"),        lower_better=True)
+    for row in rows:
+        msg += row + "\n"
+    msg += f"  {'밸류 점수':<12} {v1:>8}점    {v2:>8}점\n\n"
+
+    # 퀄리티
+    msg += "⚙️ 퀄리티\n"
+    rows.clear()
+
+    def to_pct(val):
+        if val is None:
+            return None
+        return val * 100 if abs(val) < 1 else val
+
+    add_row("ROE",        to_pct(data1.get("roe")),      to_pct(data2.get("roe")),      lower_better=False)
+    add_row("ROA",        to_pct(data1.get("roa")),      to_pct(data2.get("roa")),      lower_better=False)
+    add_row("영업이익률", to_pct(data1.get("operating_margin")), to_pct(data2.get("operating_margin")), lower_better=False)
+    add_row("부채비율",   data1.get("debt_to_equity"),   data2.get("debt_to_equity"),   lower_better=True)
+    add_row("이자보상배율",data1.get("interest_coverage"),data2.get("interest_coverage"),lower_better=False)
+
+    # F-Score
+    fs1 = data1.get("fscore_info")
+    fs2 = data2.get("fscore_info")
+    fs1_val = fs1[0] if fs1 else None
+    fs2_val = fs2[0] if fs2 else None
+    if fs1_val is not None or fs2_val is not None:
+        fs1_str = f"{fs1_val}/9" if fs1_val is not None else "N/A"
+        fs2_str = f"{fs2_val}/9" if fs2_val is not None else "N/A"
+        w1 = (fs1_val or 0) > (fs2_val or 0)
+        w2 = (fs2_val or 0) > (fs1_val or 0)
+        if w1: wins1 += 1
+        if w2: wins2 += 1
+        rows.append(f"  {'F-Score':<12} {fs1_str:>8} {'🏆' if w1 else '  '}  {fs2_str:>8} {'🏆' if w2 else '  '}")
+
+    for row in rows:
+        msg += row + "\n"
+    msg += f"  {'퀄리티 점수':<12} {q1:>8}점    {q2:>8}점\n\n"
+
+    # 모멘텀
+    msg += "📈 모멘텀\n"
+    rows.clear()
+
+    hist1 = data1.get("history")
+    hist2 = data2.get("history")
+
+    def calc_return(hist, days):
+        if hist is None or hist.empty or len(hist) < days:
+            return None
+        return ((hist["Close"].iloc[-1] - hist["Close"].iloc[-days]) / hist["Close"].iloc[-days]) * 100
+
+    ret1_1m = calc_return(hist1, 21)
+    ret2_1m = calc_return(hist2, 21)
+    ret1_3m = calc_return(hist1, 63)
+    ret2_3m = calc_return(hist2, 63)
+    ret1_6m = calc_return(hist1, 126)
+    ret2_6m = calc_return(hist2, 126)
+
+    def add_ret_row(label, r1, r2):
+        nonlocal wins1, wins2
+        if r1 is None and r2 is None:
+            return
+        s1 = "N/A" if r1 is None else f"{r1:+.1f}%"
+        s2 = "N/A" if r2 is None else f"{r2:+.1f}%"
+        w1 = (r1 or -999) > (r2 or -999) and r1 is not None and r2 is not None
+        w2 = (r2 or -999) > (r1 or -999) and r1 is not None and r2 is not None
+        if w1: wins1 += 1
+        if w2: wins2 += 1
+        rows.append(f"  {label:<12} {s1:>8} {'🏆' if w1 else '  '}  {s2:>8} {'🏆' if w2 else '  '}")
+
+    add_ret_row("1개월 수익률", ret1_1m, ret2_1m)
+    add_ret_row("3개월 수익률", ret1_3m, ret2_3m)
+    add_ret_row("6개월 수익률", ret1_6m, ret2_6m)
+    add_row("배당수익률", data1.get("dividend_yield"), data2.get("dividend_yield"), lower_better=False)
+
+    for row in rows:
+        msg += row + "\n"
+    msg += f"  {'모멘텀 점수':<12} {m1:>8}점    {m2:>8}점\n\n"
+
+    # 종합
+    msg += "━━━━━━━━━━━━━━━\n"
+    msg += f"📊 종합 점수\n"
+    msg += f"  {'최종 점수':<12} {final1:>8}점    {final2:>8}점\n\n"
+
+    # 승자 결정
+    grade1, opinion1 = grade_score(final1)
+    grade2, opinion2 = grade_score(final2)
+    msg += f"  {name1}: {grade1} ({opinion1})\n"
+    msg += f"  {name2}: {grade2} ({opinion2})\n\n"
+
+    if wins1 > wins2:
+        diff = wins1 - wins2
+        msg += f"🏆 종합 우위: {name1} ({wins1}:{wins2})\n"
+    elif wins2 > wins1:
+        diff = wins2 - wins1
+        msg += f"🏆 종합 우위: {name2} ({wins2}:{wins1})\n"
+    else:
+        msg += f"🤝 팽팽한 접전! ({wins1}:{wins2})\n"
+
+    msg += "\n💡 본 분석은 참고용이며, 투자 결정의 책임은 본인에게 있습니다."
+    return msg
+
+
+async def compare_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/compare 삼성전자 SK하이닉스"""
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "📊 팩터 비교 사용법:\n"
+            "/compare <종목1> <종목2>\n\n"
+            "예시:\n"
+            "  /compare 삼성전자 SK하이닉스\n"
+            "  /compare AAPL MSFT\n"
+            "  /compare 삼성전자 AAPL\n\n"
+            "밸류/퀄리티/모멘텀 항목별 비교 + 종합 우위 표시"
+        )
+        return
+
+    q1 = context.args[0].strip()
+    q2 = context.args[1].strip()
+
+    await update.message.reply_text(f"⏳ {q1} vs {q2} 비교 분석 중...")
+
+    chat_id = update.effective_chat.id
+
+    async def run():
+        try:
+            loop = asyncio.get_event_loop()
+            data1, data2 = await loop.run_in_executor(None, run_compare, q1, q2)
+
+            if not data1:
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ '{q1}' 종목을 찾을 수 없어요.")
+                return
+            if not data2:
+                await context.bot.send_message(chat_id=chat_id, text=f"❌ '{q2}' 종목을 찾을 수 없어요.")
+                return
+
+            msg = format_compare_result(data1, data2)
+            await context.bot.send_message(chat_id=chat_id, text=msg, disable_web_page_preview=True)
+        except Exception as e:
+            logger.exception("팩터 비교 실패")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 오류: {e}")
+
+    asyncio.create_task(run())
+
+
 async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """업종 캐시 수동 갱신."""
     await update.message.reply_text(
@@ -2861,6 +3150,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /corr <종목1> <종목2> ... [6m/1y/3y]\n"
         "  예) /corr 삼성전자 SK하이닉스 1y\n"
         "      /corr AAPL MSFT GOOGL 3y\n\n"
+        "⚖️ 팩터 비교:\n"
+        "  /compare <종목1> <종목2>\n"
+        "  예) /compare 삼성전자 SK하이닉스\n"
+        "      /compare AAPL MSFT\n\n"
         "🏭 업종 상대평가:\n"
         "  /sector_update  → 업종 캐시 수동 갱신\n"
         "  (팩터 분석 시 자동 표시)\n\n"
@@ -3662,14 +3955,27 @@ def main() -> None:
     app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(CommandHandler("backtest_portfolio", backtest_portfolio_cmd))
     app.add_handler(CommandHandler("corr", corr_cmd))
+    app.add_handler(CommandHandler("compare", compare_cmd))
     app.add_handler(CommandHandler("sector_update", sector_update_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # 매일 새벽 6시 업종 캐시 갱신
-    app.job_queue.run_daily(
-        lambda ctx: threading.Thread(target=_build_cache, daemon=True).start(),
-        time=datetime.strptime("06:00", "%H:%M").time().replace(tzinfo=ZoneInfo("Asia/Seoul")),
-    )
+    # 매일 새벽 6시 업종 캐시 갱신 (job-queue 없이 threading으로 구현)
+    def _daily_cache_scheduler():
+        while True:
+            try:
+                now = datetime.now(ZoneInfo("Asia/Seoul"))
+                # 다음 새벽 6시까지 대기
+                next_run = now.replace(hour=6, minute=0, second=0, microsecond=0)
+                if now >= next_run:
+                    next_run = next_run.replace(day=next_run.day + 1)
+                wait_sec = (next_run - now).total_seconds()
+                time.sleep(wait_sec)
+                _build_cache()
+            except Exception as e:
+                logger.error(f"업종 캐시 스케줄러 오류: {e}")
+                time.sleep(3600)  # 오류 시 1시간 후 재시도
+
+    threading.Thread(target=_daily_cache_scheduler, daemon=True).start()
 
     logger.info("퀀트 봇 시작...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
