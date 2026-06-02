@@ -8,10 +8,8 @@ import os
 import re
 import io
 import gc
-import time
 import asyncio
 import logging
-import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -612,6 +610,10 @@ def get_us_stock_data(ticker: str):
             "industry": info.get("industry", ""),
             "history": hist,
             "currency": "USD", "market": "US",
+            # 미국 수급 대체 지표
+            "institutional_pct": info.get("heldPercentInstitutions"),
+            "insider_pct": info.get("heldPercentInsiders"),
+            "short_ratio": info.get("shortRatio"),
         }
     except Exception as e:
         logger.error(f"미국 주식 데이터 실패 ({ticker}): {e}")
@@ -689,47 +691,43 @@ def calc_revenue_growth(t_obj) -> float | None:
 
 
 def score_value(data):
-    """밸류 팩터 (낮은 PER/ForwardPER/PBR/PSR이 좋음)."""
-    scores = []
+    """밸류 팩터 (가중치 기반).
+    Forward PER 20% / PER 20% / PEG 15% / PBR 20% / EV/EBITDA 10% / EPS성장률 10% / PSR 5%
+    Forward PER 없으면 PEG에 가중치 합산 (15→35%)
+    """
+    weighted_scores = []  # [(score, weight)]
     details = []
 
-    # Trailing PER
+    has_forward_pe = False
+
+    # 1. PER (20%)
     pe = data.get("pe_ratio")
     if pe and pe > 0:
-        if pe < 10:
-            s, g = 90, "매우 저평가"
-        elif pe < 15:
-            s, g = 75, "저평가"
-        elif pe < 20:
-            s, g = 60, "적정"
-        elif pe < 30:
-            s, g = 40, "다소 비쌈"
-        else:
-            s, g = 20, "고평가"
-        scores.append(s)
+        if pe < 5:    s, g = 95, "매우 저평가"
+        elif pe < 10: s, g = 85, "저평가"
+        elif pe < 15: s, g = 70, "적정 저평가"
+        elif pe < 20: s, g = 55, "적정"
+        elif pe < 30: s, g = 35, "다소 비쌈"
+        else:         s, g = 15, "고평가"
+        weighted_scores.append((s, 20))
         details.append(f"PER: {pe:.2f}배 ({g})")
     elif pe and pe < 0:
         details.append(f"PER: {pe:.2f}배 (적자)")
 
-    # Forward PER (미래 실적 기반, 가중치 1.5배)
+    # 2. Forward PER (20%, 없으면 PEG에 합산)
     fpe = data.get("forward_pe")
     if fpe and fpe > 0:
-        if fpe < 10:
-            s, g = 90, "매우 저평가"
-        elif fpe < 15:
-            s, g = 75, "저평가"
-        elif fpe < 20:
-            s, g = 60, "적정"
-        elif fpe < 30:
-            s, g = 40, "다소 비쌈"
-        else:
-            s, g = 20, "고평가"
-        # Forward PER은 미래 기반이라 가중치 1.5배
-        scores.append(s)
-        scores.append(s)  # 동일 점수 두 번 추가 = 1.5배 가중치 효과
+        has_forward_pe = True
+        if fpe < 5:    s, g = 95, "매우 저평가"
+        elif fpe < 10: s, g = 85, "저평가"
+        elif fpe < 15: s, g = 70, "적정 저평가"
+        elif fpe < 20: s, g = 55, "적정"
+        elif fpe < 30: s, g = 35, "다소 비쌈"
+        else:          s, g = 15, "고평가"
+        weighted_scores.append((s, 20))
         details.append(f"Forward PER: {fpe:.2f}배 ({g}) ★")
 
-        # Trailing vs Forward 비교 (실적 개선 여부)
+        # Trailing vs Forward 비교
         if pe and pe > 0 and fpe > 0:
             if fpe < pe * 0.9:
                 details.append(f"  → 실적 개선 기대 ({pe:.1f}배 → {fpe:.1f}배)")
@@ -738,169 +736,156 @@ def score_value(data):
     elif fpe and fpe < 0:
         details.append(f"Forward PER: {fpe:.2f}배 (적자 예상)")
 
-    pb = data.get("pb_ratio")
-    if pb and pb > 0:
-        if pb < 1.0:
-            s, g = 90, "매우 저평가"
-        elif pb < 2.0:
-            s, g = 70, "저평가"
-        elif pb < 3.0:
-            s, g = 55, "적정"
-        elif pb < 5.0:
-            s, g = 35, "다소 비쌈"
-        else:
-            s, g = 20, "고평가"
-        scores.append(s)
-        details.append(f"PBR: {pb:.2f}배 ({g})")
-
-    ps = data.get("ps_ratio")
-    if ps and ps > 0:
-        if ps < 1.0:
-            s = 85
-        elif ps < 2.0:
-            s = 65
-        elif ps < 5.0:
-            s = 45
-        else:
-            s = 25
-        scores.append(s)
-        details.append(f"PSR: {ps:.2f}배")
-
-    # EPS 성장률 (Trailing → Forward, 높을수록 좋음)
+    # 3. PEG (15%, Forward PER 없으면 35%)
+    eps_growth = None
     eps = data.get("eps")
     feps = data.get("forward_eps")
-    eps_growth = None
     if eps and feps and eps > 0 and feps > 0:
         eps_growth = ((feps - eps) / abs(eps)) * 100
-        if eps_growth > 30:
-            s, g = 95, "고성장"
-        elif eps_growth > 15:
-            s, g = 80, "성장"
-        elif eps_growth > 5:
-            s, g = 65, "완만한 성장"
-        elif eps_growth > -5:
-            s, g = 50, "보합"
-        elif eps_growth > -15:
-            s, g = 30, "감익"
-        else:
-            s, g = 15, "급감익"
-        scores.append(s)
+
+    peg_weight = 35 if not has_forward_pe else 15
+    if pe and pe > 0 and eps_growth and eps_growth > 0:
+        peg = pe / eps_growth
+        if peg < 0.5:   s, g = 95, "매우 저평가"
+        elif peg < 1.0:  s, g = 80, "저평가"
+        elif peg < 1.5:  s, g = 60, "적정"
+        elif peg < 2.0:  s, g = 40, "다소 비쌈"
+        else:            s, g = 20, "고평가"
+        weighted_scores.append((s, peg_weight))
+        star = "★★" if peg_weight > 15 else "★"
+        details.append(f"PEG: {peg:.2f} ({g}) {star}")
+    elif pe and pe > 0 and eps_growth and eps_growth <= 0:
+        details.append(f"PEG: 산출불가 (EPS 감소 중)")
+
+    # 4. PBR (20%)
+    pb = data.get("pb_ratio")
+    if pb and pb > 0:
+        if pb < 0.7:   s, g = 95, "매우 저평가"
+        elif pb < 1.0: s, g = 85, "저평가"
+        elif pb < 2.0: s, g = 65, "적정"
+        elif pb < 3.0: s, g = 45, "다소 비쌈"
+        elif pb < 5.0: s, g = 30, "비쌈"
+        else:          s, g = 15, "고평가"
+        weighted_scores.append((s, 20))
+        details.append(f"PBR: {pb:.2f}배 ({g})")
+
+    # 5. EV/EBITDA (10%)
+    ev_ebitda = data.get("ev_ebitda")
+    if ev_ebitda and ev_ebitda > 0:
+        if ev_ebitda < 6:    s, g = 95, "매우 저평가"
+        elif ev_ebitda < 10: s, g = 80, "저평가"
+        elif ev_ebitda < 15: s, g = 60, "적정"
+        elif ev_ebitda < 20: s, g = 40, "다소 비쌈"
+        else:                s, g = 20, "고평가"
+        weighted_scores.append((s, 10))
+        details.append(f"EV/EBITDA: {ev_ebitda:.2f}배 ({g})")
+
+    # 6. EPS 성장률 (10%)
+    if eps_growth is not None:
+        if eps_growth > 30:    s, g = 95, "고성장"
+        elif eps_growth > 15:  s, g = 80, "성장"
+        elif eps_growth > 5:   s, g = 65, "완만한 성장"
+        elif eps_growth > -5:  s, g = 50, "보합"
+        elif eps_growth > -15: s, g = 30, "감익"
+        else:                  s, g = 15, "급감익"
+        weighted_scores.append((s, 10))
         sign = "+" if eps_growth >= 0 else ""
         details.append(f"EPS 성장률: {sign}{eps_growth:.1f}% ({g}) ★")
     elif eps:
         details.append(f"EPS: {eps:.2f} (Forward EPS 데이터 없음)")
 
-    # EV/EBITDA (낮을수록 저평가)
-    ev_ebitda = data.get("ev_ebitda")
-    if ev_ebitda and ev_ebitda > 0:
-        if ev_ebitda < 6:
-            s, g = 95, "매우 저평가"
-        elif ev_ebitda < 10:
-            s, g = 80, "저평가"
-        elif ev_ebitda < 15:
-            s, g = 62, "적정"
-        elif ev_ebitda < 20:
-            s, g = 42, "다소 비쌈"
-        else:
-            s, g = 22, "고평가"
-        scores.append(s)
-        details.append(f"EV/EBITDA: {ev_ebitda:.2f}배 ({g})")
+    # 7. PSR (5%)
+    ps = data.get("ps_ratio")
+    if ps and ps > 0:
+        if ps < 1.0:   s = 85
+        elif ps < 2.0: s = 65
+        elif ps < 5.0: s = 45
+        else:          s = 25
+        weighted_scores.append((s, 5))
+        details.append(f"PSR: {ps:.2f}배")
 
-    # PEG (PER / EPS성장률, 1.0 이하면 성장 대비 저평가) - 가중치 2배
-    pe = data.get("pe_ratio")
-    if pe and pe > 0 and eps_growth and eps_growth > 0:
-        peg = pe / eps_growth
-        if peg < 0.5:
-            s, g = 95, "매우 저평가"
-        elif peg < 1.0:
-            s, g = 80, "저평가"
-        elif peg < 1.5:
-            s, g = 60, "적정"
-        elif peg < 2.0:
-            s, g = 40, "다소 비쌈"
-        else:
-            s, g = 20, "고평가"
-        scores.append(s)
-        scores.append(s)  # 가중치 2배 (성장 감안한 밸류 중요도 상향)
-        details.append(f"PEG: {peg:.2f} ({g}) ★★")
-    elif pe and pe > 0 and eps_growth and eps_growth <= 0:
-        details.append(f"PEG: 산출불가 (EPS 감소 중)")
-
-    if not scores:
+    if not weighted_scores:
         return 0, ["데이터 부족"]
-    return int(np.mean(scores)), details
+
+    # 가중 평균 계산
+    total_weight = sum(w for _, w in weighted_scores)
+    weighted_sum = sum(s * w for s, w in weighted_scores)
+    final_score = int(weighted_sum / total_weight)
+
+    return final_score, details
 
 
 def score_quality(data):
-    """퀄리티 팩터 (높은 ROE/영업이익률, 낮은 부채비율, EPS 안정성)."""
-    scores = []
+    """퀄리티 팩터 (가중치 기반).
+    ROE 25% / 부채비율 25% / 영업이익률 25% / 이자보상배율 15% / EPS흑자 10%
+    """
+    weighted_scores = []  # [(score, weight)]
     details = []
     holding = is_holding_company(data)
 
+    # 1. ROE (25%)
     roe = data.get("roe")
     if roe is not None:
-        roe_pct = roe * 100
-        if roe_pct > 20:
-            s, g = 95, "매우 우수"
-        elif roe_pct > 15:
-            s, g = 80, "우수"
-        elif roe_pct > 10:
-            s, g = 65, "양호"
-        elif roe_pct > 5:
-            s, g = 45, "평범"
-        else:
-            s, g = 25, "낮음"
-        scores.append(s)
+        roe_pct = roe * 100 if abs(roe) < 1 else roe
+        if roe_pct > 25:    s, g = 95, "매우 우수"
+        elif roe_pct > 20:  s, g = 85, "우수"
+        elif roe_pct > 15:  s, g = 75, "양호"
+        elif roe_pct > 10:  s, g = 60, "적정"
+        elif roe_pct > 5:   s, g = 40, "평범"
+        elif roe_pct > 0:   s, g = 25, "낮음"
+        else:               s, g = 10, "적자"
+        weighted_scores.append((s, 25))
         details.append(f"ROE: {roe_pct:.2f}% ({g})")
 
-    op = data.get("operating_margin")
-    if op is not None:
-        op_pct = op * 100
-        if holding:
-            # 지주/금융은 영업이익률 점수화 제외, 참고용으로만 표시
-            details.append(f"영업이익률: {op_pct:.2f}% (지주/금융사 특성상 점수 제외)")
-        else:
-            if op_pct > 20:
-                s = 90
-            elif op_pct > 15:
-                s = 75
-            elif op_pct > 10:
-                s = 60
-            elif op_pct > 5:
-                s = 40
-            else:
-                s = 20
-            scores.append(s)
-            details.append(f"영업이익률: {op_pct:.2f}%")
-
+    # 2. 부채비율 (25%)
     debt = data.get("debt_to_equity")
     if debt is not None:
         if holding:
-            # 지주/금융은 부채비율 기준 완화
-            if debt < 100:
-                s, g = 80, "안정"
-            elif debt < 200:
-                s, g = 65, "보통"
-            elif debt < 400:
-                s, g = 45, "높음"
-            else:
-                s, g = 25, "매우 높음"
+            if debt < 100:    s, g = 80, "안정"
+            elif debt < 200:  s, g = 65, "보통"
+            elif debt < 400:  s, g = 45, "높음"
+            else:             s, g = 25, "매우 높음"
             details.append(f"부채비율: {debt:.0f}% ({g}, 지주/금융 기준)")
         else:
-            if debt < 30:
-                s, g = 90, "매우 안정"
-            elif debt < 50:
-                s, g = 75, "안정"
-            elif debt < 100:
-                s, g = 55, "보통"
-            elif debt < 200:
-                s, g = 35, "높음"
-            else:
-                s, g = 15, "매우 높음"
+            if debt < 20:     s, g = 95, "매우 안정"
+            elif debt < 50:   s, g = 80, "안정"
+            elif debt < 100:  s, g = 60, "보통"
+            elif debt < 200:  s, g = 35, "높음"
+            elif debt < 300:  s, g = 20, "매우 높음"
+            else:             s, g = 10, "위험"
             details.append(f"부채비율: {debt:.0f}% ({g})")
-        scores.append(s)
+        weighted_scores.append((s, 25))
 
-    # EPS 안정성 (적자 여부 + 흑자 수준)
+    # 3. 영업이익률 (25%)
+    op = data.get("operating_margin")
+    if op is not None:
+        op_pct = op * 100 if abs(op) < 1 else op
+        if holding:
+            details.append(f"영업이익률: {op_pct:.2f}% (지주/금융 특성상 점수 제외)")
+        else:
+            if op_pct > 25:    s = 95
+            elif op_pct > 20:  s = 85
+            elif op_pct > 15:  s = 70
+            elif op_pct > 10:  s = 55
+            elif op_pct > 5:   s = 40
+            elif op_pct > 0:   s = 25
+            else:              s = 10
+            weighted_scores.append((s, 25))
+            details.append(f"영업이익률: {op_pct:.2f}%")
+
+    # 4. 이자보상배율 (15%)
+    ic = data.get("interest_coverage")
+    if ic is not None:
+        if ic > 15:    s, g = 95, "매우 안전"
+        elif ic > 10:  s, g = 85, "안전"
+        elif ic > 5:   s, g = 70, "양호"
+        elif ic > 3:   s, g = 55, "보통"
+        elif ic > 1:   s, g = 30, "주의"
+        else:          s, g = 10, "위험 ⚠️"
+        weighted_scores.append((s, 15))
+        details.append(f"이자보상배율: {ic:.1f}배 ({g})")
+
+    # 5. EPS 흑자 여부 (10%)
     eps = data.get("eps")
     if eps is not None:
         if eps > 0:
@@ -909,49 +894,25 @@ def score_quality(data):
         else:
             s, g = 10, "적자"
             details.append(f"EPS: {eps:.2f} ({g}) ⚠️")
-        scores.append(s)
+        weighted_scores.append((s, 10))
 
-    # ROA (총자산 대비 이익률, ROE 보완)
-    roa = data.get("roa")
-    if roa is not None:
-        roa_pct = roa * 100
-        if roa_pct > 15:
-            s, g = 95, "매우 우수"
-        elif roa_pct > 10:
-            s, g = 80, "우수"
-        elif roa_pct > 5:
-            s, g = 65, "양호"
-        elif roa_pct > 2:
-            s, g = 45, "평범"
-        else:
-            s, g = 25, "낮음"
-        scores.append(s)
-        details.append(f"ROA: {roa_pct:.2f}% ({g})")
-
-    # 이자보상배율 (영업이익 / 이자비용, 높을수록 안전)
-    ic = data.get("interest_coverage")
-    if ic is not None:
-        if ic > 10:
-            s, g = 95, "매우 안전"
-        elif ic > 5:
-            s, g = 80, "안전"
-        elif ic > 3:
-            s, g = 60, "보통"
-        elif ic > 1:
-            s, g = 35, "주의"
-        else:
-            s, g = 10, "위험 ⚠️"
-        scores.append(s)
-        details.append(f"이자보상배율: {ic:.1f}배 ({g})")
-
-    if not scores:
+    if not weighted_scores:
         return 0, ["데이터 부족"]
-    return int(np.mean(scores)), details
+
+    # 가중 평균 계산
+    total_weight = sum(w for _, w in weighted_scores)
+    weighted_sum = sum(s * w for s, w in weighted_scores)
+    final_score = int(weighted_sum / total_weight)
+
+    return final_score, details
 
 
 def score_momentum(data):
-    """모멘텀 팩터 (수익률 + RSI + 52주 위치 + 거래량)."""
-    scores = []
+    """모멘텀 팩터 (가중치 기반).
+    수급 20% / MA정배열 25% / 6M수익률 10% / 3M수익률 10% / 1M수익률 10%
+    RSI 10% / 거래량 10% / MACD 5%
+    """
+    weighted_scores = []  # [(score, weight)]
     details = []
     hist = data.get("history")
 
@@ -960,36 +921,26 @@ def score_momentum(data):
 
     current = hist["Close"].iloc[-1]
 
-    # 1) 수익률 모멘텀 (1M/3M/6M/12M)
+    # 1) 수익률 모멘텀 (1M 10% + 3M 10% + 6M 10%)
     details.append("📈 수익률")
-    ret_scores = []
-    periods = [("1M", 21), ("3M", 63), ("6M", 126), ("12M", 252)]
-    weights = [1, 2, 2, 1]
-    for (label, days), w in zip(periods, weights):
+    ret_map = {}
+    for label, days, weight in [("1M", 21, 10), ("3M", 63, 10), ("6M", 126, 10)]:
         if len(hist) >= days:
             past = hist["Close"].iloc[-days]
             ret = ((current - past) / past) * 100
+            ret_map[label] = ret
             sign = "+" if ret >= 0 else ""
             details.append(f"   • {label}: {sign}{ret:.2f}%")
-            if ret > 30:
-                s = 95
-            elif ret > 15:
-                s = 80
-            elif ret > 5:
-                s = 65
-            elif ret > -5:
-                s = 50
-            elif ret > -15:
-                s = 35
-            elif ret > -30:
-                s = 20
-            else:
-                s = 10
-            ret_scores.extend([s] * w)
-    if ret_scores:
-        scores.append(int(np.mean(ret_scores)))
+            if ret > 30:    s = 95
+            elif ret > 15:  s = 80
+            elif ret > 5:   s = 65
+            elif ret > -5:  s = 50
+            elif ret > -15: s = 35
+            elif ret > -30: s = 20
+            else:           s = 10
+            weighted_scores.append((s, weight))
 
-    # 2) RSI (14일 기준)
+    # 2) RSI 14일 (10%)
     if len(hist) >= 14:
         delta = hist["Close"].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
@@ -998,23 +949,23 @@ def score_momentum(data):
         rsi = (100 - (100 / (1 + rs))).iloc[-1]
         details.append(f"\n📊 RSI (14일): {rsi:.1f}")
         if rsi < 30:
-            s, g = 85, "과매도 (반등 가능)"
+            s = 85
             details.append(f"   • 과매도 구간 → 매수 관심 ★")
         elif rsi < 45:
-            s, g = 65, "약세"
+            s = 65
             details.append(f"   • 약세 구간")
         elif rsi < 55:
-            s, g = 55, "중립"
+            s = 55
             details.append(f"   • 중립 구간")
         elif rsi < 70:
-            s, g = 70, "강세"
+            s = 70
             details.append(f"   • 강세 구간 ★")
         else:
-            s, g = 35, "과매수 (조정 주의)"
+            s = 35
             details.append(f"   • 과매수 구간 → 주의 ⚠️")
-        scores.append(s)
+        weighted_scores.append((s, 10))
 
-    # 3) 52주 신고가 대비 위치
+    # 3) 52주 위치 (참고 표시, 점수 미반영)
     high_52 = hist["High"].max()
     low_52 = hist["Low"].min()
     if high_52 > low_52:
@@ -1022,23 +973,17 @@ def score_momentum(data):
         details.append(f"\n📍 52주 위치: {position:.1f}%")
         details.append(f"   • 저점 {low_52:,.0f} ~ 고점 {high_52:,.0f}")
         if position >= 80:
-            s = 85
             details.append(f"   • 52주 고점 근처 (강한 상승 추세)")
         elif position >= 60:
-            s = 70
             details.append(f"   • 상단 영역 (상승 추세)")
         elif position >= 40:
-            s = 55
             details.append(f"   • 중간 영역")
         elif position >= 20:
-            s = 40
             details.append(f"   • 하단 영역 (약세)")
         else:
-            s = 25
             details.append(f"   • 52주 저점 근처 ⚠️")
-        scores.append(s)
 
-    # 4) 거래량 모멘텀 (최근 5일 평균 vs 20일 평균)
+    # 4) 거래량 모멘텀 (10%)
     if len(hist) >= 20:
         vol_5 = hist["Volume"].iloc[-5:].mean()
         vol_20 = hist["Volume"].iloc[-20:].mean()
@@ -1057,9 +1002,9 @@ def score_momentum(data):
             else:
                 s = 30
                 details.append(f"   • 거래량 감소 (관심 하락)")
-            scores.append(s)
+            weighted_scores.append((s, 10))
 
-    # 5) 이동평균선 정배열 (MA20, MA60, MA120)
+    # 5) MA 정배열 (25%)
     if len(hist) >= 120:
         ma20 = hist["Close"].rolling(20).mean().iloc[-1]
         ma60 = hist["Close"].rolling(60).mean().iloc[-1]
@@ -1067,19 +1012,17 @@ def score_momentum(data):
         details.append(f"\n📊 이동평균선")
         details.append(f"   • MA20: {ma20:,.0f} | MA60: {ma60:,.0f} | MA120: {ma120:,.0f}")
 
-        # 정배열: MA20 > MA60 > MA120 (강한 상승 추세)
-        # 역배열: MA20 < MA60 < MA120 (강한 하락 추세)
         if ma20 > ma60 > ma120 and current > ma20:
-            s = 90
+            s = 95
             details.append(f"   • 완전 정배열 (강한 상승 추세) ★")
         elif ma20 > ma60 > ma120:
-            s = 75
+            s = 80
             details.append(f"   • 정배열 (상승 추세)")
         elif ma20 > ma60 and current > ma20:
             s = 65
             details.append(f"   • 단기 상승 추세")
         elif ma20 < ma60 < ma120 and current < ma20:
-            s = 15
+            s = 10
             details.append(f"   • 완전 역배열 (강한 하락 추세) ⚠️")
         elif ma20 < ma60 < ma120:
             s = 25
@@ -1090,9 +1033,8 @@ def score_momentum(data):
         else:
             s = 50
             details.append(f"   • 혼조 (방향성 불분명)")
-        scores.append(s)
+        weighted_scores.append((s, 25))
     elif len(hist) >= 60:
-        # 데이터 부족 시 MA20, MA60만으로 판단
         ma20 = hist["Close"].rolling(20).mean().iloc[-1]
         ma60 = hist["Close"].rolling(60).mean().iloc[-1]
         details.append(f"\n📊 이동평균선 (단기)")
@@ -1106,11 +1048,10 @@ def score_momentum(data):
         else:
             s = 50
             details.append(f"   • 혼조")
-        scores.append(s)
+        weighted_scores.append((s, 25))
 
-    # 6) MACD (단기/장기 EMA 차이로 추세 전환 포착)
+    # 6) MACD (5%)
     if len(hist) >= 35:
-        # MACD = EMA(12) - EMA(26), Signal = MACD의 EMA(9)
         ema12 = hist["Close"].ewm(span=12, adjust=False).mean()
         ema26 = hist["Close"].ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
@@ -1125,8 +1066,6 @@ def score_momentum(data):
         details.append(f"\n📈 MACD")
         details.append(f"   • MACD: {macd_now:,.1f} | Signal: {signal_now:,.1f}")
 
-        # 골든크로스: 히스토그램이 음수 → 양수 전환
-        # 데드크로스: 히스토그램이 양수 → 음수 전환
         if hist_prev < 0 and hist_now >= 0:
             s = 90
             details.append(f"   • 골든크로스 발생! (강한 매수 신호) ★")
@@ -1145,55 +1084,113 @@ def score_momentum(data):
         else:
             s = 40
             details.append(f"   • MACD < Signal (하락 추세)")
-        scores.append(s)
+        weighted_scores.append((s, 5))
 
-    if not scores:
+    # 7) 수급 (20%)
+    market = data.get("market", "")
+
+    if market == "KR":
+        # 한국: KIS API 외국인/기관 순매수
+        foreigner = data.get("foreigner_net")
+        institution = data.get("institution_net")
+        if foreigner is not None or institution is not None:
+            details.append(f"\n👥 외국인/기관 수급")
+            fg_str = ""
+            if foreigner is not None:
+                fg_sign = "▲" if foreigner > 0 else "▼"
+                fg_str = f"외국인 {fg_sign}{abs(foreigner):,}주"
+            inst_str = ""
+            if institution is not None:
+                inst_sign = "▲" if institution > 0 else "▼"
+                inst_str = f"기관 {inst_sign}{abs(institution):,}주"
+            if fg_str and inst_str:
+                details.append(f"   • {fg_str} / {inst_str}")
+            elif fg_str:
+                details.append(f"   • {fg_str}")
+            elif inst_str:
+                details.append(f"   • {inst_str}")
+
+            if foreigner is not None and institution is not None:
+                if foreigner > 0 and institution > 0:
+                    s = 85
+                    details.append(f"   • 외국인+기관 동반 순매수 ★")
+                elif foreigner > 0 or institution > 0:
+                    s = 65
+                    details.append(f"   • 외국인/기관 순매수")
+                elif foreigner < 0 and institution < 0:
+                    s = 25
+                    details.append(f"   • 외국인+기관 동반 순매도 ⚠️")
+                else:
+                    s = 45
+                    details.append(f"   • 수급 혼조")
+            elif foreigner is not None:
+                s = 65 if foreigner > 0 else 35
+            else:
+                s = 65 if institution > 0 else 35
+            weighted_scores.append((s, 20))
+
+    elif market == "US":
+        # 미국: 기관보유 + 공매도 + 내부자 (수급 대체 지표)
+        inst_pct = data.get("institutional_pct")
+        short_ratio = data.get("short_ratio")
+        insider_pct = data.get("insider_pct")
+
+        if inst_pct is not None or short_ratio is not None:
+            details.append(f"\n👥 수급 대체 지표 (기관/공매도)")
+            sub_scores = []
+
+            # 기관 보유비율 (40% of 수급)
+            if inst_pct is not None:
+                inst_pct_val = inst_pct * 100 if inst_pct < 1 else inst_pct
+                if inst_pct_val >= 80:    s = 90
+                elif inst_pct_val >= 60:  s = 75
+                elif inst_pct_val >= 40:  s = 55
+                elif inst_pct_val >= 20:  s = 35
+                else:                     s = 20
+                sub_scores.append((s, 40))
+                details.append(f"   • 기관 보유: {inst_pct_val:.1f}%")
+
+            # 공매도 비율 (30% of 수급)
+            if short_ratio is not None:
+                if short_ratio < 1:      s = 80
+                elif short_ratio < 2:    s = 65
+                elif short_ratio < 5:    s = 45
+                elif short_ratio < 10:   s = 30
+                else:                    s = 15
+                sub_scores.append((s, 30))
+                details.append(f"   • 공매도 비율: {short_ratio:.1f}일")
+
+            # 내부자 보유비율 (30% of 수급)
+            if insider_pct is not None:
+                insider_val = insider_pct * 100 if insider_pct < 1 else insider_pct
+                if insider_val >= 10:    s = 80
+                elif insider_val >= 5:   s = 65
+                elif insider_val >= 1:   s = 50
+                else:                    s = 40
+                sub_scores.append((s, 30))
+                details.append(f"   • 내부자 보유: {insider_val:.1f}%")
+
+            if sub_scores:
+                total_w = sum(w for _, w in sub_scores)
+                supply_score = int(sum(s * w for s, w in sub_scores) / total_w)
+                weighted_scores.append((supply_score, 20))
+
+                if supply_score >= 70:
+                    details.append(f"   • 수급 양호 (기관 보유 높음)")
+                elif supply_score >= 50:
+                    details.append(f"   • 수급 보통")
+                else:
+                    details.append(f"   • 수급 부정적 (기관 이탈/숏 많음) ⚠️")
+
+    if not weighted_scores:
         return 0, ["데이터 부족"]
 
-    # 7) 외국인/기관 수급 (KIS API 연동 시)
-    foreigner = data.get("foreigner_net")
-    institution = data.get("institution_net")
-    if foreigner is not None or institution is not None:
-        details.append(f"\n👥 외국인/기관 수급")
+    # 가중 평균 계산
+    total_weight = sum(w for _, w in weighted_scores)
+    weighted_sum = sum(s * w for s, w in weighted_scores)
+    final_score = int(weighted_sum / total_weight)
 
-        fg_str = ""
-        if foreigner is not None:
-            fg_sign = "▲" if foreigner > 0 else "▼"
-            fg_str = f"외국인 {fg_sign}{abs(foreigner):,}주"
-        inst_str = ""
-        if institution is not None:
-            inst_sign = "▲" if institution > 0 else "▼"
-            inst_str = f"기관 {inst_sign}{abs(institution):,}주"
-        if fg_str and inst_str:
-            details.append(f"   • {fg_str} / {inst_str}")
-        elif fg_str:
-            details.append(f"   • {fg_str}")
-        elif inst_str:
-            details.append(f"   • {inst_str}")
-
-        # 수급 점수화
-        if foreigner is not None and institution is not None:
-            if foreigner > 0 and institution > 0:
-                s = 85
-                details.append(f"   • 외국인+기관 동반 순매수 ★")
-            elif foreigner > 0 or institution > 0:
-                s = 65
-                details.append(f"   • 기관/외국인 순매수")
-            elif foreigner < 0 and institution < 0:
-                s = 25
-                details.append(f"   • 외국인+기관 동반 순매도 ⚠️")
-            else:
-                s = 45
-                details.append(f"   • 수급 혼조")
-        elif foreigner is not None:
-            s = 65 if foreigner > 0 else 35
-            details.append(f"   • 외국인 {'순매수' if foreigner > 0 else '순매도'}")
-        else:
-            s = 65 if institution > 0 else 35
-            details.append(f"   • 기관 {'순매수' if institution > 0 else '순매도'}")
-        scores.append(s)
-
-    return int(np.mean(scores)), details
+    return final_score, details
 
 
 # ============================================================
@@ -2711,43 +2708,8 @@ def format_correlation_message(result: dict) -> str:
     return msg
 
 
-# ============================================================
-# 팩터 비교
-# ============================================================
-
-def format_compare_message(q1: str, q2: str) -> str:
-    """두 종목 팩터 비교 메시지 생성."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    # 두 종목 병렬 조회
-    results = {}
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        future_map = {
-            executor.submit(process_factor, q1): q1,
-            executor.submit(process_factor, q2): q2,
-        }
-        for future in as_completed(future_map):
-            q = future_map[future]
-            try:
-                results[q] = future.result()
-            except Exception as e:
-                logger.warning(f"팩터 비교 조회 실패 ({q}): {e}")
-                results[q] = None
-
-    msg1 = results.get(q1)
-    msg2 = results.get(q2)
-
-    if not msg1 or not msg2:
-        failed = q1 if not msg1 else q2
-        return f"❌ '{failed}' 종목 데이터를 가져올 수 없어요."
-
-    # process_factor는 메시지 문자열을 반환하므로
-    # 데이터를 직접 가져오도록 별도 처리
-    return None  # 아래 compare_cmd에서 직접 처리
-
-
 def run_compare(q1: str, q2: str) -> tuple:
-    """두 종목 팩터 데이터 병렬 조회. (data1, data2) 반환."""
+    """두 종목 팩터 데이터 병렬 조회."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def fetch(query):
@@ -2780,176 +2742,109 @@ def run_compare(q1: str, q2: str) -> tuple:
 
 def format_compare_result(data1: dict, data2: dict) -> str:
     """팩터 비교 결과 메시지 생성."""
-    name1 = data1.get("name", "종목1")
-    name2 = data2.get("name", "종목2")
+    name1 = (data1.get("name") or "종목1")[:8]
+    name2 = (data2.get("name") or "종목2")[:8]
 
     # 점수 계산
     v1, _ = score_value(data1)
-    q1, _ = score_quality(data1)
+    q1_s, _ = score_quality(data1)
     m1, _ = score_momentum(data1)
-    total1 = calc_weighted_overall(v1, q1, m1)
+    total1 = calc_weighted_overall(v1, q1_s, m1)
     penalty1, _ = check_risk_warnings(data1)
     final1 = max(0, total1 - penalty1)
 
     v2, _ = score_value(data2)
-    q2, _ = score_quality(data2)
+    q2_s, _ = score_quality(data2)
     m2, _ = score_momentum(data2)
-    total2 = calc_weighted_overall(v2, q2, m2)
+    total2 = calc_weighted_overall(v2, q2_s, m2)
     penalty2, _ = check_risk_warnings(data2)
     final2 = max(0, total2 - penalty2)
 
-    # 이름 길이 맞추기
-    n1 = name1[:8]
-    n2 = name2[:8]
-    col_w = max(len(n1), len(n2), 6) + 2
-
-    def winner(v_better, v_worse):
-        """더 좋은 쪽 반환."""
-        return "🏆" if v_better else "  "
-
-    def fmt_val(val, is_pct=False, decimals=1):
-        if val is None:
-            return "N/A"
-        if is_pct:
-            return f"{val*100:.{decimals}f}%" if abs(val) < 10 else f"{val:.{decimals}f}%"
-        return f"{val:.{decimals}f}"
-
     wins1 = 0
     wins2 = 0
-    rows = []
 
     def add_row(label, val1, val2, lower_better=False):
         nonlocal wins1, wins2
         if val1 is None and val2 is None:
-            return
-        v1_str = "N/A" if val1 is None else f"{val1:.2f}"
-        v2_str = "N/A" if val2 is None else f"{val2:.2f}"
-
-        if val1 is not None and val2 is not None:
-            if lower_better:
-                w1 = val1 < val2
-            else:
-                w1 = val1 > val2
+            return ""
+        s1 = "N/A" if val1 is None else f"{val1:.2f}"
+        s2 = "N/A" if val2 is None else f"{val2:.2f}"
+        w1 = w2 = False
+        if val1 is not None and val2 is not None and abs(val1 - val2) > 0.01:
+            w1 = (val1 < val2) if lower_better else (val1 > val2)
             w2 = not w1
-            if abs(val1 - val2) < 0.01:  # 거의 동일
-                w1 = w2 = False
-        else:
-            w1 = w2 = False
+        if w1: wins1 += 1
+        if w2: wins2 += 1
+        return f"  {label:<12} {s1:>8} {'🏆' if w1 else '  '}  {s2:>8} {'🏆' if w2 else '  '}\n"
 
-        if w1:
-            wins1 += 1
-        if w2:
-            wins2 += 1
-
-        w1_str = "🏆" if w1 else "  "
-        w2_str = "🏆" if w2 else "  "
-        rows.append(f"  {label:<12} {v1_str:>8} {w1_str}  {v2_str:>8} {w2_str}")
+    def to_pct(val):
+        if val is None: return None
+        return val * 100 if abs(val) < 1 else val
 
     msg = f"📊 팩터 비교\n"
-    msg += f"{'':>14} {n1:>{col_w}} {'':>3} {n2:>{col_w}}\n"
+    msg += f"{'':>15} {name1:>10}    {name2:>10}\n"
     msg += "━━━━━━━━━━━━━━━\n"
 
     # 밸류
     msg += "💰 밸류\n"
-    rows.clear()
-    add_row("PER",        data1.get("pe_ratio"),         data2.get("pe_ratio"),         lower_better=True)
-    add_row("Forward PER",data1.get("forward_pe"),       data2.get("forward_pe"),       lower_better=True)
-    add_row("PBR",        data1.get("pb_ratio"),         data2.get("pb_ratio"),         lower_better=True)
-    add_row("PSR",        data1.get("ps_ratio"),         data2.get("ps_ratio"),         lower_better=True)
-    add_row("EV/EBITDA",  data1.get("ev_ebitda"),        data2.get("ev_ebitda"),        lower_better=True)
-    for row in rows:
-        msg += row + "\n"
+    msg += add_row("PER",         data1.get("pe_ratio"),    data2.get("pe_ratio"),    lower_better=True)
+    msg += add_row("Forward PER", data1.get("forward_pe"),  data2.get("forward_pe"),  lower_better=True)
+    msg += add_row("PBR",         data1.get("pb_ratio"),    data2.get("pb_ratio"),    lower_better=True)
+    msg += add_row("EV/EBITDA",   data1.get("ev_ebitda"),   data2.get("ev_ebitda"),   lower_better=True)
     msg += f"  {'밸류 점수':<12} {v1:>8}점    {v2:>8}점\n\n"
 
     # 퀄리티
     msg += "⚙️ 퀄리티\n"
-    rows.clear()
+    msg += add_row("ROE(%)",      to_pct(data1.get("roe")),              to_pct(data2.get("roe")),              lower_better=False)
+    msg += add_row("영업이익률",  to_pct(data1.get("operating_margin")), to_pct(data2.get("operating_margin")), lower_better=False)
+    msg += add_row("부채비율",    data1.get("debt_to_equity"),           data2.get("debt_to_equity"),           lower_better=True)
+    msg += add_row("이자보상배율",data1.get("interest_coverage"),        data2.get("interest_coverage"),        lower_better=False)
 
-    def to_pct(val):
-        if val is None:
-            return None
-        return val * 100 if abs(val) < 1 else val
-
-    add_row("ROE",        to_pct(data1.get("roe")),      to_pct(data2.get("roe")),      lower_better=False)
-    add_row("ROA",        to_pct(data1.get("roa")),      to_pct(data2.get("roa")),      lower_better=False)
-    add_row("영업이익률", to_pct(data1.get("operating_margin")), to_pct(data2.get("operating_margin")), lower_better=False)
-    add_row("부채비율",   data1.get("debt_to_equity"),   data2.get("debt_to_equity"),   lower_better=True)
-    add_row("이자보상배율",data1.get("interest_coverage"),data2.get("interest_coverage"),lower_better=False)
-
-    # F-Score
     fs1 = data1.get("fscore_info")
     fs2 = data2.get("fscore_info")
-    fs1_val = fs1[0] if fs1 else None
-    fs2_val = fs2[0] if fs2 else None
-    if fs1_val is not None or fs2_val is not None:
-        fs1_str = f"{fs1_val}/9" if fs1_val is not None else "N/A"
-        fs2_str = f"{fs2_val}/9" if fs2_val is not None else "N/A"
-        w1 = (fs1_val or 0) > (fs2_val or 0)
-        w2 = (fs2_val or 0) > (fs1_val or 0)
+    fs1v = fs1[0] if fs1 else None
+    fs2v = fs2[0] if fs2 else None
+    if fs1v is not None or fs2v is not None:
+        w1 = (fs1v or 0) > (fs2v or 0)
+        w2 = (fs2v or 0) > (fs1v or 0)
         if w1: wins1 += 1
         if w2: wins2 += 1
-        rows.append(f"  {'F-Score':<12} {fs1_str:>8} {'🏆' if w1 else '  '}  {fs2_str:>8} {'🏆' if w2 else '  '}")
-
-    for row in rows:
-        msg += row + "\n"
-    msg += f"  {'퀄리티 점수':<12} {q1:>8}점    {q2:>8}점\n\n"
+        msg += f"  {'F-Score':<12} {str(fs1v)+'/9' if fs1v else 'N/A':>8} {'🏆' if w1 else '  '}  {str(fs2v)+'/9' if fs2v else 'N/A':>8} {'🏆' if w2 else '  '}\n"
+    msg += f"  {'퀄리티 점수':<12} {q1_s:>8}점    {q2_s:>8}점\n\n"
 
     # 모멘텀
     msg += "📈 모멘텀\n"
-    rows.clear()
-
     hist1 = data1.get("history")
     hist2 = data2.get("history")
 
-    def calc_return(hist, days):
-        if hist is None or hist.empty or len(hist) < days:
-            return None
+    def calc_ret(hist, days):
+        if hist is None or hist.empty or len(hist) < days: return None
         return ((hist["Close"].iloc[-1] - hist["Close"].iloc[-days]) / hist["Close"].iloc[-days]) * 100
 
-    ret1_1m = calc_return(hist1, 21)
-    ret2_1m = calc_return(hist2, 21)
-    ret1_3m = calc_return(hist1, 63)
-    ret2_3m = calc_return(hist2, 63)
-    ret1_6m = calc_return(hist1, 126)
-    ret2_6m = calc_return(hist2, 126)
-
-    def add_ret_row(label, r1, r2):
-        nonlocal wins1, wins2
-        if r1 is None and r2 is None:
-            return
+    for label, days in [("1M", 21), ("3M", 63), ("6M", 126)]:
+        r1, r2 = calc_ret(hist1, days), calc_ret(hist2, days)
+        if r1 is None and r2 is None: continue
         s1 = "N/A" if r1 is None else f"{r1:+.1f}%"
         s2 = "N/A" if r2 is None else f"{r2:+.1f}%"
-        w1 = (r1 or -999) > (r2 or -999) and r1 is not None and r2 is not None
-        w2 = (r2 or -999) > (r1 or -999) and r1 is not None and r2 is not None
+        w1 = r1 is not None and r2 is not None and r1 > r2
+        w2 = r1 is not None and r2 is not None and r2 > r1
         if w1: wins1 += 1
         if w2: wins2 += 1
-        rows.append(f"  {label:<12} {s1:>8} {'🏆' if w1 else '  '}  {s2:>8} {'🏆' if w2 else '  '}")
-
-    add_ret_row("1개월 수익률", ret1_1m, ret2_1m)
-    add_ret_row("3개월 수익률", ret1_3m, ret2_3m)
-    add_ret_row("6개월 수익률", ret1_6m, ret2_6m)
-    add_row("배당수익률", data1.get("dividend_yield"), data2.get("dividend_yield"), lower_better=False)
-
-    for row in rows:
-        msg += row + "\n"
+        msg += f"  {label:<12} {s1:>8} {'🏆' if w1 else '  '}  {s2:>8} {'🏆' if w2 else '  '}\n"
     msg += f"  {'모멘텀 점수':<12} {m1:>8}점    {m2:>8}점\n\n"
 
     # 종합
     msg += "━━━━━━━━━━━━━━━\n"
-    msg += f"📊 종합 점수\n"
-    msg += f"  {'최종 점수':<12} {final1:>8}점    {final2:>8}점\n\n"
-
-    # 승자 결정
-    grade1, opinion1 = grade_score(final1)
-    grade2, opinion2 = grade_score(final2)
-    msg += f"  {name1}: {grade1} ({opinion1})\n"
-    msg += f"  {name2}: {grade2} ({opinion2})\n\n"
+    msg += f"📊 종합\n"
+    msg += f"  {'최종 점수':<12} {final1:>8}점    {final2:>8}점\n"
+    g1, o1 = grade_score(final1)
+    g2, o2 = grade_score(final2)
+    msg += f"  {name1}: {g1} ({o1})\n"
+    msg += f"  {name2}: {g2} ({o2})\n\n"
 
     if wins1 > wins2:
-        diff = wins1 - wins2
         msg += f"🏆 종합 우위: {name1} ({wins1}:{wins2})\n"
     elif wins2 > wins1:
-        diff = wins2 - wins1
         msg += f"🏆 종합 우위: {name2} ({wins2}:{wins1})\n"
     else:
         msg += f"🤝 팽팽한 접전! ({wins1}:{wins2})\n"
@@ -2974,25 +2869,21 @@ async def compare_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     q1 = context.args[0].strip()
     q2 = context.args[1].strip()
-
     await update.message.reply_text(f"⏳ {q1} vs {q2} 비교 분석 중...")
-
     chat_id = update.effective_chat.id
 
     async def run():
         try:
             loop = asyncio.get_event_loop()
             data1, data2 = await loop.run_in_executor(None, run_compare, q1, q2)
-
             if not data1:
                 await context.bot.send_message(chat_id=chat_id, text=f"❌ '{q1}' 종목을 찾을 수 없어요.")
                 return
             if not data2:
                 await context.bot.send_message(chat_id=chat_id, text=f"❌ '{q2}' 종목을 찾을 수 없어요.")
                 return
-
             msg = format_compare_result(data1, data2)
-            await context.bot.send_message(chat_id=chat_id, text=msg, disable_web_page_preview=True)
+            await context.bot.send_message(chat_id=chat_id, text=msg)
         except Exception as e:
             logger.exception("팩터 비교 실패")
             await context.bot.send_message(chat_id=chat_id, text=f"⚠️ 오류: {e}")
@@ -3024,6 +2915,7 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         except Exception as e:
             logger.error(f"업종 캐시 갱신 실패: {e}")
 
+    import threading
     threading.Thread(target=_build, daemon=True).start()
 
 
@@ -3151,10 +3043,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  /corr <종목1> <종목2> ... [6m/1y/3y]\n"
         "  예) /corr 삼성전자 SK하이닉스 1y\n"
         "      /corr AAPL MSFT GOOGL 3y\n\n"
-        "⚖️ 팩터 비교:\n"
-        "  /compare <종목1> <종목2>\n"
-        "  예) /compare 삼성전자 SK하이닉스\n"
-        "      /compare AAPL MSFT\n\n"
         "🏭 업종 상대평가:\n"
         "  /sector_update  → 업종 캐시 수동 갱신\n"
         "  (팩터 분석 시 자동 표시)\n\n"
@@ -3931,6 +3819,7 @@ def main() -> None:
     load_screening_universe()
 
     # 업종 캐시 백그라운드 빌드 (봇 시작 직후 비동기로)
+    import threading
     def _build_cache():
         try:
             build_sector_cache()
@@ -3959,21 +3848,20 @@ def main() -> None:
     app.add_handler(CommandHandler("sector_update", sector_update_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # 매일 새벽 6시 업종 캐시 갱신 (job-queue 없이 threading으로 구현)
+    # 매일 새벽 6시 업종 캐시 갱신 (threading 스케줄러)
     def _daily_cache_scheduler():
         while True:
             try:
                 now = datetime.now(ZoneInfo("Asia/Seoul"))
-                # 다음 새벽 6시까지 대기
                 next_run = now.replace(hour=6, minute=0, second=0, microsecond=0)
                 if now >= next_run:
-                    next_run = next_run.replace(day=next_run.day + 1)
+                    next_run = next_run + __import__('datetime').timedelta(days=1)
                 wait_sec = (next_run - now).total_seconds()
                 time.sleep(wait_sec)
                 _build_cache()
             except Exception as e:
                 logger.error(f"업종 캐시 스케줄러 오류: {e}")
-                time.sleep(3600)  # 오류 시 1시간 후 재시도
+                time.sleep(3600)
 
     threading.Thread(target=_daily_cache_scheduler, daemon=True).start()
 
