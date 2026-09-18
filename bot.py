@@ -8,9 +8,10 @@ import os
 import re
 import io
 import gc
+import time
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 # .env 파일 로딩 (로컬 테스트용, Railway 환경변수는 덮어쓰지 않음)
@@ -3855,7 +3856,7 @@ def main() -> None:
                 now = datetime.now(ZoneInfo("Asia/Seoul"))
                 next_run = now.replace(hour=6, minute=0, second=0, microsecond=0)
                 if now >= next_run:
-                    next_run = next_run + __import__('datetime').timedelta(days=1)
+                    next_run = next_run + timedelta(days=1)
                 wait_sec = (next_run - now).total_seconds()
                 time.sleep(wait_sec)
                 _build_cache()
