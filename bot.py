@@ -3704,7 +3704,7 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     return
 
                 processed += 1
-                data = fetch_stock_quick(item)
+                data = await asyncio.to_thread(fetch_stock_quick, item)
                 if data:
                     if all(check_condition(data, c) for c in conditions):
                         matches.append(data)
