@@ -6,7 +6,6 @@ from datetime import datetime
 import pandas as pd
 import requests
 import yfinance as yf
-from bs4 import BeautifulSoup
 from config import HEADERS, STOCK_MAP, logger
 
 
@@ -220,79 +219,46 @@ def record_scrape(source: str, ok: bool) -> None:
     if total % 50 == 0 and stats[1] / total > 0.5:
         logger.warning(f"스크래핑 실패율 높음 [{source}]: {stats[1]}/{total} — 사이트 구조 변경 의심")
 
+def _naver_infos(code: str) -> dict:
+    """네이버 모바일 API totalInfos → {code: value}."""
+    res = requests.get(
+        f"https://m.stock.naver.com/api/stock/{code}/integration",
+        headers=HEADERS, timeout=10,
+    )
+    res.raise_for_status()
+    return {t["code"]: t.get("value") for t in res.json()["totalInfos"]}
+
+
+def _naver_num(text) -> float | None:
+    m = re.search(r"-?[\d,]+(?:\.\d+)?", text or "")
+    return float(m.group().replace(",", "")) if m else None
+
+
 def get_naver_per_pbr(code: str) -> dict:
-    """네이버 금융에서 PER, PBR 파싱."""
+    """네이버 금융(모바일 API)에서 PER, PBR 조회."""
     result = {"per": None, "pbr": None}
     try:
-        url = f"https://finance.naver.com/item/main.naver?code={code}"
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        res.raise_for_status()
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        # PER, PBR은 .blind 태그로 감싸진 테이블에 있음
-        table = soup.select_one("table.per_table")
-        if table:
-            for em in table.select("em"):
-                text = em.get_text(strip=True).replace(",", "")
-                try:
-                    val = float(text)
-                    em_id = em.get("id", "")
-                    if "PER" in em_id or "per" in em_id.lower():
-                        result["per"] = val
-                    elif "PBR" in em_id or "pbr" in em_id.lower():
-                        result["pbr"] = val
-                except ValueError:
-                    continue
-
-        # fallback: 텍스트에서 직접 추출
-        if result["per"] is None or result["pbr"] is None:
-            text = soup.get_text(" ", strip=True)
-            per_m = re.search(r'PER\s*([\d.]+)배', text)
-            pbr_m = re.search(r'PBR\s*([\d.]+)배', text)
-            if per_m and result["per"] is None:
-                result["per"] = float(per_m.group(1))
-            if pbr_m and result["pbr"] is None:
-                result["pbr"] = float(pbr_m.group(1))
-
+        infos = _naver_infos(code)
+        result["per"] = _naver_num(infos.get("per"))
+        result["pbr"] = _naver_num(infos.get("pbr"))
         record_scrape("naver", result["pbr"] is not None)
     except Exception as e:
         record_scrape("naver", False)
-        logger.debug(f"네이버 PER/PBR 파싱 실패 ({code}): {e}")
+        logger.debug(f"네이버 PER/PBR 조회 실패 ({code}): {e}")
     return result
 
-def get_wisereport_forward_eps(code: str) -> float | None:
-    """wisereport 컨센서스에서 Forward EPS 파싱."""
+
+def get_naver_forward_eps(code: str) -> float | None:
+    """네이버 컨센서스 추정EPS(Forward EPS) 조회."""
     try:
-        url = f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={code}"
-        referer = f"https://finance.naver.com/item/coinfo.naver?code={code}"
-        res = requests.get(url, headers={**HEADERS, "Referer": referer}, timeout=10)
-        res.raise_for_status()
-        record_scrape("wisereport", True)
-        soup = BeautifulSoup(res.text, "html.parser")
-        text = soup.get_text(" ", strip=True)
-
-        # wisereport 컨센서스 테이블에서 EPS 추출
-        # 패턴: "EPS (원) 숫자 숫자 숫자" 형태로 현재연도/다음연도 순서
-        m = re.search(r'EPS\s*[\(（]?원?[\)）]?\s*([\d,]+)\s+([\d,]+)', text)
-        if m:
-            # 두 번째 값이 다음 연도 Forward EPS
-            forward_eps = float(m.group(2).replace(",", ""))
-            if forward_eps > 0:
-                logger.info(f"Forward EPS wisereport: {code} = {forward_eps}")
-                return forward_eps
-
-        # 추가 패턴 시도
-        m2 = re.search(r'컨센서스.*?EPS.*?([\d,]+)', text)
-        if m2:
-            val = float(m2.group(1).replace(",", ""))
-            if val > 0:
-                return val
-
-        return None
+        eps = _naver_num(_naver_infos(code).get("cnsEps"))
+        record_scrape("naver_fwd_eps", True)
+        return eps if eps and eps > 0 else None
     except Exception as e:
-        record_scrape("wisereport", False)
-        logger.debug(f"wisereport Forward EPS 파싱 실패 ({code}): {e}")
+        record_scrape("naver_fwd_eps", False)
+        logger.debug(f"네이버 Forward EPS 조회 실패 ({code}): {e}")
         return None
+
 
 def calc_eps_from_financials(t_obj) -> float | None:
     """재무제표에서 EPS 직접 계산 (당기순이익 / 발행주식수)."""
@@ -379,7 +345,7 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             tasks["ev"]       = lambda: calc_ev_ebitda(t_obj, info)
             tasks["div"]      = lambda: calc_dividend_growth(t_obj)
             tasks["fscore"]   = lambda: calc_piotroski_fscore(t_obj, {"market_cap": info.get("marketCap") if info else None})
-            tasks["fwd_eps"]  = lambda: get_wisereport_forward_eps(code)
+            tasks["fwd_eps"]  = lambda: get_naver_forward_eps(code)
             tasks["op_margin"] = lambda: calc_ttm_operating_margin(t_obj)
             tasks["ic"]        = lambda: calc_interest_coverage(t_obj)
 
@@ -445,10 +411,10 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             rev_growth = results.get("rev")
             div_yield  = info.get("dividendYield")
 
-        # Forward PE / Forward EPS (KIS 미지원 → yfinance + wisereport)
+        # Forward PE / Forward EPS (KIS 미지원 → yfinance + 네이버)
         forward_pe  = info.get("forwardPE") if info else None
         if not forward_eps and info:
-            forward_eps = info.get("forwardEps") or get_wisereport_forward_eps(code)
+            forward_eps = info.get("forwardEps") or get_naver_forward_eps(code)
 
         # PS ratio (KIS 미지원 → yfinance)
         ps_ratio = info.get("priceToSalesTrailing12Months") if info else None
