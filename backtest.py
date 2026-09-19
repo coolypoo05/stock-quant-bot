@@ -149,7 +149,7 @@ def run_backtest(ticker: str, start_date: str, end_date: str = None,
             "bench_prices": bench_prices,
             "milestones": milestones,
         }
-    except Exception as e:
+    except Exception:
         logger.exception(f"백테스팅 실패 ({ticker})")
         return None
 
@@ -216,7 +216,7 @@ def create_backtest_chart(result: dict, benchmark_name: str = "벤치마크") ->
 
 def format_backtest_message(result: dict, benchmark_name: str = "") -> str:
     """백테스팅 결과 메시지."""
-    msg = f"📊 백테스팅 결과\n"
+    msg = "📊 백테스팅 결과\n"
     msg += f"📌 {result['name']} ({result['ticker']})\n"
     msg += "━━━━━━━━━━━━━━━\n"
     msg += f"📅 기간: {result['actual_start']} ~ {result['actual_end']}\n"
@@ -224,19 +224,19 @@ def format_backtest_message(result: dict, benchmark_name: str = "") -> str:
 
     # 투자 시뮬레이션
     if result["currency"] == "KRW":
-        msg += f"💰 투자 시뮬레이션 (100만원 가정)\n"
+        msg += "💰 투자 시뮬레이션 (100만원 가정)\n"
         msg += f"   매수가: {result['start_price']:,.0f}원\n"
         msg += f"   현재가: {result['end_price']:,.0f}원\n"
         msg += f"   평가금액: {result['final']:,.0f}원\n\n"
     else:
-        msg += f"💰 투자 시뮬레이션 ($10,000 가정)\n"
+        msg += "💰 투자 시뮬레이션 ($10,000 가정)\n"
         msg += f"   매수가: ${result['start_price']:.2f}\n"
         msg += f"   현재가: ${result['end_price']:.2f}\n"
         msg += f"   평가금액: ${result['final']:,.2f}\n\n"
 
     # 수익률
     sign = "+" if result["total_return"] >= 0 else ""
-    msg += f"📈 수익률\n"
+    msg += "📈 수익률\n"
     msg += f"   총 수익률: {sign}{result['total_return']:.2f}%\n"
     msg += f"   연평균 (CAGR): {sign}{result['cagr']:.2f}%\n\n"
 
@@ -245,19 +245,19 @@ def format_backtest_message(result: dict, benchmark_name: str = "") -> str:
         bsign = "+" if result["bench_return"] >= 0 else ""
         excess = result["total_return"] - result["bench_return"]
         esign = "+" if excess >= 0 else ""
-        msg += f"📊 벤치마크 대비\n"
+        msg += "📊 벤치마크 대비\n"
         msg += f"   {benchmark_name}: {bsign}{result['bench_return']:.2f}%\n"
         msg += f"   초과 수익: {esign}{excess:.2f}%p\n\n"
 
     # 리스크
-    msg += f"⚠️ 리스크 지표\n"
+    msg += "⚠️ 리스크 지표\n"
     msg += f"   최대 낙폭 (MDD): {result['mdd']:.2f}% ({result['mdd_date']})\n"
     msg += f"   연환산 변동성: {result['annual_vol']:.2f}%\n"
     msg += f"   샤프 비율: {result['sharpe']:.2f}\n"
 
     # 시점별
     if result["milestones"]:
-        msg += f"\n📉 시점별 수익률\n"
+        msg += "\n📉 시점별 수익률\n"
         for label, date, ret in result["milestones"]:
             sign = "+" if ret >= 0 else ""
             msg += f"   {label} 후 ({date}): {sign}{ret:.2f}%\n"
@@ -381,7 +381,6 @@ def run_portfolio_backtest(holdings: list, start_date: str, end_date: str = None
         ticker = None
         name = query
         currency = "USD"
-        suffix = ""
 
         # 한국 주식 시도
         result = search_kor_stock(query)

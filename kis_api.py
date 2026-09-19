@@ -10,7 +10,7 @@ import os
 import time
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # .env 파일 로딩 (로컬 테스트용)
 try:
@@ -29,12 +29,7 @@ APPKEY    = os.environ.get("KIS_APPKEY", "")
 APPSECRET = os.environ.get("KIS_APPSECRET", "")
 ACCOUNT   = os.environ.get("KIS_ACCOUNT", "")
 
-# 환경변수 로딩 확인
-all_kis_keys = [k for k in os.environ.keys() if "KIS" in k.upper()]
-logger.info(f"KIS 관련 환경변수 목록: {all_kis_keys}")
-if APPKEY:
-    logger.info(f"KIS API 키 로딩 성공 (appkey 앞 4자리: {APPKEY[:4]}...)")
-else:
+if not APPKEY:
     logger.warning("KIS_APPKEY 환경변수가 비어있습니다.")
 
 # 모의투자 도메인
@@ -111,7 +106,7 @@ def get_price(code: str) -> dict | None:
             "FID_INPUT_ISCD": code,
         }
         res = requests.get(url, headers=headers, params=params, timeout=10)
-        logger.info(f"KIS 응답 코드: {res.status_code}")
+        logger.debug(f"KIS 응답 코드: {res.status_code}")
         if res.status_code != 200:
             logger.error(f"KIS 응답 내용: {res.text[:500]}")
         res.raise_for_status()
@@ -241,7 +236,7 @@ def get_investor_trend(code: str) -> dict | None:
             "FID_INPUT_ISCD": code,
         }
         res = requests.get(url, headers=headers, params=params, timeout=10)
-        logger.info(f"KIS 수급 응답: {res.status_code} / {res.text[:200]}")
+        logger.debug(f"KIS 수급 응답: {res.status_code} / {res.text[:200]}")
         if res.status_code != 200:
             return None
         data = res.json()

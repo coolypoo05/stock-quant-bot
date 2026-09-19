@@ -71,7 +71,7 @@ def score_value(data):
         star = "★★" if peg_weight > 15 else "★"
         details.append(f"PEG: {peg:.2f} ({g}) {star}")
     elif pe and pe > 0 and eps_growth and eps_growth <= 0:
-        details.append(f"PEG: 산출불가 (EPS 감소 중)")
+        details.append("PEG: 산출불가 (EPS 감소 중)")
 
     # 4. PBR (20%)
     pb = data.get("pb_ratio")
@@ -264,19 +264,19 @@ def score_momentum(data):
         details.append(f"\n📊 RSI (14일): {rsi:.1f}")
         if rsi < 30:
             s = 85
-            details.append(f"   • 과매도 구간 → 매수 관심 ★")
+            details.append("   • 과매도 구간 → 매수 관심 ★")
         elif rsi < 45:
             s = 65
-            details.append(f"   • 약세 구간")
+            details.append("   • 약세 구간")
         elif rsi < 55:
             s = 55
-            details.append(f"   • 중립 구간")
+            details.append("   • 중립 구간")
         elif rsi < 70:
             s = 70
-            details.append(f"   • 강세 구간 ★")
+            details.append("   • 강세 구간 ★")
         else:
             s = 35
-            details.append(f"   • 과매수 구간 → 주의 ⚠️")
+            details.append("   • 과매수 구간 → 주의 ⚠️")
         weighted_scores.append((s, 10))
 
     # 3) 52주 위치 (참고 표시, 점수 미반영)
@@ -287,15 +287,15 @@ def score_momentum(data):
         details.append(f"\n📍 52주 위치: {position:.1f}%")
         details.append(f"   • 저점 {low_52:,.0f} ~ 고점 {high_52:,.0f}")
         if position >= 80:
-            details.append(f"   • 52주 고점 근처 (강한 상승 추세)")
+            details.append("   • 52주 고점 근처 (강한 상승 추세)")
         elif position >= 60:
-            details.append(f"   • 상단 영역 (상승 추세)")
+            details.append("   • 상단 영역 (상승 추세)")
         elif position >= 40:
-            details.append(f"   • 중간 영역")
+            details.append("   • 중간 영역")
         elif position >= 20:
-            details.append(f"   • 하단 영역 (약세)")
+            details.append("   • 하단 영역 (약세)")
         else:
-            details.append(f"   • 52주 저점 근처 ⚠️")
+            details.append("   • 52주 저점 근처 ⚠️")
 
     # 4) 거래량 모멘텀 (10%)
     if len(hist) >= 20:
@@ -306,16 +306,16 @@ def score_momentum(data):
             details.append(f"\n📦 거래량 모멘텀: {vol_ratio:.2f}x (5일/20일 평균)")
             if vol_ratio >= 2.0:
                 s = 85
-                details.append(f"   • 거래량 급증 (강한 관심) ★")
+                details.append("   • 거래량 급증 (강한 관심) ★")
             elif vol_ratio >= 1.3:
                 s = 70
-                details.append(f"   • 거래량 증가 (관심 상승)")
+                details.append("   • 거래량 증가 (관심 상승)")
             elif vol_ratio >= 0.7:
                 s = 50
-                details.append(f"   • 거래량 보통")
+                details.append("   • 거래량 보통")
             else:
                 s = 30
-                details.append(f"   • 거래량 감소 (관심 하락)")
+                details.append("   • 거래량 감소 (관심 하락)")
             weighted_scores.append((s, 10))
 
     # 5) MA 정배열 (25%)
@@ -323,45 +323,45 @@ def score_momentum(data):
         ma20 = hist["Close"].rolling(20).mean().iloc[-1]
         ma60 = hist["Close"].rolling(60).mean().iloc[-1]
         ma120 = hist["Close"].rolling(120).mean().iloc[-1]
-        details.append(f"\n📊 이동평균선")
+        details.append("\n📊 이동평균선")
         details.append(f"   • MA20: {ma20:,.0f} | MA60: {ma60:,.0f} | MA120: {ma120:,.0f}")
 
         if ma20 > ma60 > ma120 and current > ma20:
             s = 95
-            details.append(f"   • 완전 정배열 (강한 상승 추세) ★")
+            details.append("   • 완전 정배열 (강한 상승 추세) ★")
         elif ma20 > ma60 > ma120:
             s = 80
-            details.append(f"   • 정배열 (상승 추세)")
+            details.append("   • 정배열 (상승 추세)")
         elif ma20 > ma60 and current > ma20:
             s = 65
-            details.append(f"   • 단기 상승 추세")
+            details.append("   • 단기 상승 추세")
         elif ma20 < ma60 < ma120 and current < ma20:
             s = 10
-            details.append(f"   • 완전 역배열 (강한 하락 추세) ⚠️")
+            details.append("   • 완전 역배열 (강한 하락 추세) ⚠️")
         elif ma20 < ma60 < ma120:
             s = 25
-            details.append(f"   • 역배열 (하락 추세)")
+            details.append("   • 역배열 (하락 추세)")
         elif ma20 < ma60 and current < ma20:
             s = 35
-            details.append(f"   • 단기 하락 추세")
+            details.append("   • 단기 하락 추세")
         else:
             s = 50
-            details.append(f"   • 혼조 (방향성 불분명)")
+            details.append("   • 혼조 (방향성 불분명)")
         weighted_scores.append((s, 25))
     elif len(hist) >= 60:
         ma20 = hist["Close"].rolling(20).mean().iloc[-1]
         ma60 = hist["Close"].rolling(60).mean().iloc[-1]
-        details.append(f"\n📊 이동평균선 (단기)")
+        details.append("\n📊 이동평균선 (단기)")
         details.append(f"   • MA20: {ma20:,.0f} | MA60: {ma60:,.0f}")
         if ma20 > ma60 and current > ma20:
             s = 75
-            details.append(f"   • 단기 정배열 (상승 추세)")
+            details.append("   • 단기 정배열 (상승 추세)")
         elif ma20 < ma60 and current < ma20:
             s = 25
-            details.append(f"   • 단기 역배열 (하락 추세)")
+            details.append("   • 단기 역배열 (하락 추세)")
         else:
             s = 50
-            details.append(f"   • 혼조")
+            details.append("   • 혼조")
         weighted_scores.append((s, 25))
 
     # 6) MACD (5%)
@@ -377,27 +377,27 @@ def score_momentum(data):
         hist_now = histogram.iloc[-1]
         hist_prev = histogram.iloc[-2] if len(histogram) >= 2 else 0
 
-        details.append(f"\n📈 MACD")
+        details.append("\n📈 MACD")
         details.append(f"   • MACD: {macd_now:,.1f} | Signal: {signal_now:,.1f}")
 
         if hist_prev < 0 and hist_now >= 0:
             s = 90
-            details.append(f"   • 골든크로스 발생! (강한 매수 신호) ★")
+            details.append("   • 골든크로스 발생! (강한 매수 신호) ★")
         elif hist_prev >= 0 and hist_now < 0:
             s = 15
-            details.append(f"   • 데드크로스 발생 (매도 신호) ⚠️")
+            details.append("   • 데드크로스 발생 (매도 신호) ⚠️")
         elif macd_now > signal_now and hist_now > hist_prev:
             s = 80
-            details.append(f"   • MACD > Signal 상승세 (강세 지속)")
+            details.append("   • MACD > Signal 상승세 (강세 지속)")
         elif macd_now > signal_now:
             s = 65
-            details.append(f"   • MACD > Signal (상승 추세)")
+            details.append("   • MACD > Signal (상승 추세)")
         elif macd_now < signal_now and hist_now < hist_prev:
             s = 25
-            details.append(f"   • MACD < Signal 하락세 (약세 지속)")
+            details.append("   • MACD < Signal 하락세 (약세 지속)")
         else:
             s = 40
-            details.append(f"   • MACD < Signal (하락 추세)")
+            details.append("   • MACD < Signal (하락 추세)")
         weighted_scores.append((s, 5))
 
     # 7) 수급 (20%)
@@ -408,7 +408,7 @@ def score_momentum(data):
         foreigner = data.get("foreigner_net")
         institution = data.get("institution_net")
         if foreigner is not None or institution is not None:
-            details.append(f"\n👥 외국인/기관 수급")
+            details.append("\n👥 외국인/기관 수급")
             fg_str = ""
             if foreigner is not None:
                 fg_sign = "▲" if foreigner > 0 else "▼"
@@ -427,16 +427,16 @@ def score_momentum(data):
             if foreigner is not None and institution is not None:
                 if foreigner > 0 and institution > 0:
                     s = 85
-                    details.append(f"   • 외국인+기관 동반 순매수 ★")
+                    details.append("   • 외국인+기관 동반 순매수 ★")
                 elif foreigner > 0 or institution > 0:
                     s = 65
-                    details.append(f"   • 외국인/기관 순매수")
+                    details.append("   • 외국인/기관 순매수")
                 elif foreigner < 0 and institution < 0:
                     s = 25
-                    details.append(f"   • 외국인+기관 동반 순매도 ⚠️")
+                    details.append("   • 외국인+기관 동반 순매도 ⚠️")
                 else:
                     s = 45
-                    details.append(f"   • 수급 혼조")
+                    details.append("   • 수급 혼조")
             elif foreigner is not None:
                 s = 65 if foreigner > 0 else 35
             else:
@@ -450,7 +450,7 @@ def score_momentum(data):
         insider_pct = data.get("insider_pct")
 
         if inst_pct is not None or short_ratio is not None:
-            details.append(f"\n👥 수급 대체 지표 (기관/공매도)")
+            details.append("\n👥 수급 대체 지표 (기관/공매도)")
             sub_scores = []
 
             # 기관 보유비율 (40% of 수급)
@@ -490,11 +490,11 @@ def score_momentum(data):
                 weighted_scores.append((supply_score, 20))
 
                 if supply_score >= 70:
-                    details.append(f"   • 수급 양호 (기관 보유 높음)")
+                    details.append("   • 수급 양호 (기관 보유 높음)")
                 elif supply_score >= 50:
-                    details.append(f"   • 수급 보통")
+                    details.append("   • 수급 보통")
                 else:
-                    details.append(f"   • 수급 부정적 (기관 이탈/숏 많음) ⚠️")
+                    details.append("   • 수급 부정적 (기관 이탈/숏 많음) ⚠️")
 
     if not weighted_scores:
         return 0, ["데이터 부족"]
@@ -655,7 +655,7 @@ def check_risk_warnings(data: dict) -> tuple[int, list]:
     eps = data.get("eps")
     if eps is not None and eps < 0:
         penalty += 5
-        warnings.append(f"EPS 적자")
+        warnings.append("EPS 적자")
 
     # 5. 영업이익률 적자 (지주/금융 제외)
     op = data.get("operating_margin")
@@ -756,7 +756,7 @@ def format_factor_message(data):
 
     msg += "━━━━━━━━━━━━━━━\n"
     msg += f"📊 가중 종합 점수: {overall}점\n"
-    msg += f"   (밸류40% + 퀄리티40% + 모멘텀20%)\n"
+    msg += "   (밸류40% + 퀄리티40% + 모멘텀20%)\n"
 
     # 위험 필터 표시
     if warnings:

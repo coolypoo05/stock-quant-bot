@@ -61,6 +61,7 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "약 15~30분 소요됩니다. 완료 시 알림드려요."
     )
     chat_id = update.effective_chat.id
+    loop = asyncio.get_running_loop()  # 워커 스레드에는 루프가 없어 미리 잡아서 전달
 
     def _build():
         try:
@@ -72,7 +73,7 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                          f"업종 수: {len(SECTOR_CACHE)}개\n"
                          f"갱신일: {sector.SECTOR_CACHE_DATE}"
                 ),
-                asyncio.get_event_loop()
+                loop
             )
         except Exception as e:
             logger.error(f"업종 캐시 갱신 실패: {e}")

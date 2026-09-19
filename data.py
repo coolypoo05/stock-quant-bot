@@ -755,7 +755,6 @@ def calc_piotroski_fscore(t_obj, data: dict) -> tuple[int, list]:
                 details.append("❌ 유동비율 하락")
 
         # 7. 신주발행 없음 (주식수 동일 or 감소)
-        shares = data.get("market_cap")  # 대안으로 사용
         # yfinance 데이터 한계로 간소화: 일단 통과
         score += 1
         details.append("✅ 신주발행 체크 (간소화)")

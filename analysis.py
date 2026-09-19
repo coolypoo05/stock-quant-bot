@@ -337,7 +337,7 @@ def format_compare_result(data1: dict, data2: dict) -> str:
         if val is None: return None
         return val * 100 if abs(val) < 1 else val
 
-    msg = f"📊 팩터 비교\n"
+    msg = "📊 팩터 비교\n"
     msg += f"{'':>15} {name1:>10}    {name2:>10}\n"
     msg += "━━━━━━━━━━━━━━━\n"
 
@@ -391,7 +391,7 @@ def format_compare_result(data1: dict, data2: dict) -> str:
 
     # 종합
     msg += "━━━━━━━━━━━━━━━\n"
-    msg += f"📊 종합\n"
+    msg += "📊 종합\n"
     msg += f"  {'최종 점수':<12} {final1:>8}점    {final2:>8}점\n"
     g1, o1 = grade_score(final1)
     g2, o2 = grade_score(final2)
