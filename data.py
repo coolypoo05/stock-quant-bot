@@ -2,6 +2,7 @@
 
 import io
 import re
+import time
 from datetime import datetime
 import pandas as pd
 import requests
@@ -13,24 +14,69 @@ from config import HEADERS, STOCK_MAP, logger
 # 한국 종목 리스트
 # ============================================================
 
+def _fetch_stock_map_krx() -> dict:
+    result = {}
+    for market_type, suffix in [("stockMkt", ".KS"), ("kosdaqMkt", ".KQ")]:
+        url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
+        params = {"method": "download", "searchType": "13", "marketType": market_type}
+        res = requests.get(url, params=params, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+        df = pd.read_html(io.StringIO(res.text))[0]
+        df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
+        for _, row in df.iterrows():
+            result[row["회사명"]] = {"code": row["종목코드"], "suffix": suffix}
+    return result
+
+
+def _fetch_stock_map_naver() -> dict:
+    """KRX 차단 시 폴백: 네이버 모바일 API 시가총액 목록 (ETF/ETN 제외)."""
+    result = {}
+    for market, suffix in [("KOSPI", ".KS"), ("KOSDAQ", ".KQ")]:
+        page = 1
+        while True:
+            res = requests.get(
+                f"https://m.stock.naver.com/api/stocks/marketValue/{market}",
+                params={"page": page, "pageSize": 100}, headers=HEADERS, timeout=15,
+            )
+            res.raise_for_status()
+            j = res.json()
+            for st in j["stocks"]:
+                if st.get("stockEndType") == "stock" and re.fullmatch(r"\d{6}", st.get("itemCode", "")):
+                    result.setdefault(st["stockName"], {"code": st["itemCode"], "suffix": suffix})
+            if not j["stocks"] or page * 100 >= j["totalCount"]:
+                break
+            page += 1
+    return result
+
+
 def load_stock_map():
     logger.info("한국 종목 리스트 로딩 중...")
-    try:
-        # 코스피/코스닥 각각 로딩
-        for market_type, suffix in [("stockMkt", ".KS"), ("kosdaqMkt", ".KQ")]:
-            url = "https://kind.krx.co.kr/corpgeneral/corpList.do"
-            params = {"method": "download", "searchType": "13", "marketType": market_type}
-            res = requests.get(url, params=params, headers=HEADERS, timeout=30)
-            res.raise_for_status()
-            df = pd.read_html(io.StringIO(res.text))[0]
-            df["종목코드"] = df["종목코드"].astype(str).str.zfill(6)
-            for _, row in df.iterrows():
-                STOCK_MAP[row["회사명"]] = {"code": row["종목코드"], "suffix": suffix}
-        logger.info(f"한국 종목 리스트 로딩 완료: {len(STOCK_MAP)}개")
-    except Exception as e:
-        logger.error(f"종목 리스트 로딩 실패: {e}")
+    for source, fetch in (("KRX", _fetch_stock_map_krx), ("네이버", _fetch_stock_map_naver)):
+        try:
+            result = fetch()
+            if result:
+                STOCK_MAP.update(result)
+                logger.info(f"한국 종목 리스트 로딩 완료 ({source}): {len(STOCK_MAP)}개")
+                return
+            logger.error(f"종목 리스트 로딩 실패 ({source}): 결과 없음")
+        except Exception as e:
+            logger.error(f"종목 리스트 로딩 실패 ({source}): {e}")
+
+
+_last_stock_map_try = 0.0
+
+
+def _ensure_stock_map() -> None:
+    """사전이 비어 있으면 검색 시점에 재로딩 (60초 쿨다운)."""
+    global _last_stock_map_try
+    if STOCK_MAP or time.time() - _last_stock_map_try < 60:
+        return
+    _last_stock_map_try = time.time()
+    load_stock_map()
+
 
 def search_kor_stock(query: str):
+    _ensure_stock_map()
     query = query.strip()
     # 6자리 코드로 검색
     if re.fullmatch(r"\d{6}", query):
