@@ -5,7 +5,6 @@ import re
 import pandas as pd
 import requests
 import yfinance as yf
-from bs4 import BeautifulSoup
 from config import HEADERS, logger
 
 
@@ -55,30 +54,21 @@ def load_screening_universe():
     except Exception as e:
         logger.warning(f"KOSPI200 로딩 실패: {e}")
 
-    # 2. 코스닥150: 네이버 금융에서 시가총액 상위 150개 조회 (빠름)
+    # 2. 코스닥150: 네이버 모바일 API에서 시가총액 상위 150개 조회
     try:
-        kosdaq_top = []
-        for page in range(1, 5):  # 페이지당 50개 × 4 = 200개에서 150개 선택
-            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=1&page={page}"
-            res = requests.get(url, headers=HEADERS, timeout=15)
-            res.encoding = "euc-kr"
-            soup = BeautifulSoup(res.text, "html.parser")
-            rows = soup.select("table.type_2 tbody tr")
-            for row in rows:
-                link = row.select_one("a.tltle")
-                if not link:
-                    continue
-                name = link.get_text(strip=True)
-                href = link.get("href", "")
-                code_match = re.search(r"code=(\d{6})", href)
-                if not code_match:
-                    continue
-                code = code_match.group(1)
-                kosdaq_top.append({"code": code, "name": name})
-                if len(kosdaq_top) >= 150:
-                    break
-            if len(kosdaq_top) >= 150:
-                break
+        stocks = []
+        for page in (1, 2):  # API 최대 pageSize=100
+            res = requests.get(
+                "https://m.stock.naver.com/api/stocks/marketValue/KOSDAQ",
+                params={"page": page, "pageSize": 100}, headers=HEADERS, timeout=15,
+            )
+            res.raise_for_status()
+            stocks += res.json()["stocks"]
+        kosdaq_top = [
+            {"code": s["itemCode"], "name": s["stockName"]}
+            for s in stocks
+            if re.fullmatch(r"\d{6}", s.get("itemCode", ""))
+        ][:150]
 
         for item in kosdaq_top:
             SCREENING_UNIVERSE.append({
