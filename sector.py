@@ -1,5 +1,7 @@
 """업종 평균 캐시 및 업종 상대평가"""
 
+import json
+import os
 import time
 from datetime import datetime
 from config import logger
@@ -76,6 +78,39 @@ def build_sector_cache():
     SECTOR_CACHE.update(cache)
     SECTOR_CACHE_DATE = datetime.now().strftime("%Y-%m-%d")
     logger.info(f"업종 캐시 완료: {len(cache)}개 업종, {sum(v['count'] for v in cache.values())}개 종목")
+    save_sector_cache()
+
+SECTOR_CACHE_PATH = os.environ.get("SECTOR_CACHE_PATH", "sector_cache.json")
+
+
+def save_sector_cache() -> None:
+    """재시작 후에도 쓰도록 파일에 저장 (Railway는 볼륨 경로를 SECTOR_CACHE_PATH로 지정해야 유지됨)."""
+    try:
+        tmp = SECTOR_CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"date": SECTOR_CACHE_DATE, "cache": SECTOR_CACHE}, f, ensure_ascii=False)
+        os.replace(tmp, SECTOR_CACHE_PATH)
+    except Exception as e:
+        logger.error(f"업종 캐시 저장 실패: {e}")
+
+
+def load_sector_cache() -> bool:
+    """저장된 업종 캐시 로딩. 성공하면 True."""
+    global SECTOR_CACHE_DATE
+    try:
+        with open(SECTOR_CACHE_PATH, encoding="utf-8") as f:
+            saved = json.load(f)
+        SECTOR_CACHE.clear()
+        SECTOR_CACHE.update(saved["cache"])
+        SECTOR_CACHE_DATE = saved["date"]
+        logger.info(f"업종 캐시 파일 로딩: {len(SECTOR_CACHE)}개 업종 ({SECTOR_CACHE_DATE})")
+        return bool(SECTOR_CACHE)
+    except FileNotFoundError:
+        return False
+    except Exception as e:
+        logger.error(f"업종 캐시 파일 로딩 실패: {e}")
+        return False
+
 
 def get_sector_comparison(sector: str, data: dict) -> list[str]:
     """업종 평균 대비 비교 텍스트 반환."""

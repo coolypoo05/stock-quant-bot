@@ -2,7 +2,10 @@
 
 import logging
 import os
+import time
 from zoneinfo import ZoneInfo
+
+import requests
 
 
 
@@ -39,3 +42,20 @@ HEADERS = {
 STOCK_MAP: dict = {}  # {종목명: {"code": "005930", "suffix": ".KS"}}
 
 KST = ZoneInfo("Asia/Seoul")
+
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
+_last_alert: dict = {}
+
+
+def notify_admin(key: str, text: str, cooldown: int = 3600) -> None:
+    """ADMIN_CHAT_ID가 설정돼 있으면 텔레그램으로 경고 전송 (key별 쿨다운)."""
+    if not ADMIN_CHAT_ID or time.time() - _last_alert.get(key, 0) < cooldown:
+        return
+    _last_alert[key] = time.time()
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": ADMIN_CHAT_ID, "text": text}, timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"관리자 알림 전송 실패: {type(e).__name__}")  # 예외 메시지에 토큰 URL이 있을 수 있어 타입만 기록

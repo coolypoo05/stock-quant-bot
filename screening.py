@@ -5,7 +5,7 @@ import re
 import pandas as pd
 import requests
 import yfinance as yf
-from config import HEADERS, logger
+from config import HEADERS, logger, notify_admin
 
 
 # ============================================================
@@ -15,6 +15,8 @@ from config import HEADERS, logger
 SCREENING_UNIVERSE = []  # [{"code", "name", "suffix", "market"}]
 
 ACTIVE_SCREENINGS = {}   # {chat_id: {"cancel": False}}
+
+UNIVERSE_EXPECTED = {"KOSPI200": (150, 250), "KOSDAQ150": (100, 200), "SP500": (450, 550)}
 
 def load_screening_universe():
     """코스피200 + 코스닥150(대형주) + S&P500 로딩."""
@@ -99,6 +101,17 @@ def load_screening_universe():
         logger.error(f"S&P500 로딩 실패: {e}")
 
     logger.info(f"스크리닝 유니버스 로딩 완료: {len(SCREENING_UNIVERSE)}개")
+
+    # 소스 구조가 바뀌면 조용히 0건이 되므로 기대 개수 범위를 벗어나면 경고
+    counts = {}
+    for it in SCREENING_UNIVERSE:
+        counts[it["market"]] = counts.get(it["market"], 0) + 1
+    for market, (lo, hi) in UNIVERSE_EXPECTED.items():
+        n = counts.get(market, 0)
+        if not lo <= n <= hi:
+            msg = f"스크리닝 유니버스 이상 [{market}]: {n}개 (기대 {lo}~{hi})"
+            logger.warning(msg)
+            notify_admin(f"universe:{market}", f"⚠️ {msg}")
 
 def parse_screen_conditions(text: str) -> list:
     """'PER<10 ROE>15' 같은 조건 파싱."""

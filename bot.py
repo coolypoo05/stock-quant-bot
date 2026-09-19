@@ -11,9 +11,12 @@ from screening import ACTIVE_SCREENINGS, SCREENING_UNIVERSE, check_condition, fe
 from backtest import create_portfolio_chart, format_portfolio_message, parse_backtest_args, parse_portfolio_args, process_backtest, run_portfolio_backtest
 from data import SCRAPE_STATS, load_stock_map
 from scoring import process_factor
-from config import BOT_TOKEN, logger
+from config import BOT_TOKEN, KST, logger
 import sector
-from sector import SECTOR_CACHE, build_sector_cache
+from sector import SECTOR_CACHE, build_sector_cache, load_sector_cache
+
+
+SCREEN_WORKERS = 5  # /screen 동시 조회 수
 
 
 async def compare_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -232,7 +235,7 @@ async def factor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     query = " ".join(context.args).strip()
     await update.message.reply_text("⏳ 팩터 분석 중...")
     try:
-        result = process_factor(query)
+        result = await asyncio.to_thread(process_factor, query)
         if result:
             await update.message.reply_text(result, disable_web_page_preview=True)
         else:
@@ -483,25 +486,23 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ])
     total = len(universe)
 
-    # 예상 시간 계산
-    est_min = max(1, total * 0.3 // 60)
-    await update.message.reply_text(
-        f"🔍 스크리닝 시작!\n"
-        f"범위: {market_label}\n"
-        f"조건: {cond_summary}\n"
-        f"종목 수: {total}개\n"
-        f"⏳ 약 {est_min}~{est_min+5}분 소요. 완료 시 자동 알림드려요."
-    )
-
     chat_id = update.effective_chat.id
-
-    # 이미 진행 중인 스크리닝 있으면 거부
     if chat_id in ACTIVE_SCREENINGS:
         await update.message.reply_text(
             "⚠️ 이미 진행 중인 스크리닝이 있어요.\n"
             "/stop_screen 으로 중단 후 다시 시도하세요."
         )
         return
+
+    # 예상 시간 (실측: 5종목 배치당 약 1초)
+    est_min = max(1, int(total / SCREEN_WORKERS // 60))
+    await update.message.reply_text(
+        f"🔍 스크리닝 시작!\n"
+        f"범위: {market_label}\n"
+        f"조건: {cond_summary}\n"
+        f"종목 수: {total}개\n"
+        f"⏳ 약 {est_min}~{est_min+3}분 소요. 완료 시 자동 알림드려요."
+    )
 
     # 진행 상태 등록
     ACTIVE_SCREENINGS[chat_id] = {"cancel": False}
@@ -514,7 +515,7 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             processed = 0
             last_progress = 0
 
-            for item in universe:
+            for i in range(0, total, SCREEN_WORKERS):
                 # 중단 체크
                 if ACTIVE_SCREENINGS.get(chat_id, {}).get("cancel"):
                     await context.bot.send_message(
@@ -523,15 +524,18 @@ async def screen_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     )
                     return
 
-                processed += 1
-                data = await asyncio.to_thread(fetch_stock_quick, item)
-                if data:
-                    if all(check_condition(data, c) for c in conditions):
+                batch = universe[i:i + SCREEN_WORKERS]
+                results = await asyncio.gather(
+                    *(asyncio.to_thread(fetch_stock_quick, item) for item in batch)
+                )
+                processed += len(batch)
+                for data in results:
+                    if data and all(check_condition(data, c) for c in conditions):
                         matches.append(data)
 
                 await asyncio.sleep(0.3)
 
-                if processed % 50 == 0:
+                if processed % 50 < SCREEN_WORKERS:
                     gc.collect()
 
                 if processed - last_progress >= 100:
@@ -621,7 +625,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.message.text.strip()
     logger.info(f"조회 요청: {query}")
     try:
-        result = process_factor(query)
+        result = await asyncio.to_thread(process_factor, query)
         if result:
             await update.message.reply_text(result, disable_web_page_preview=True)
         else:
@@ -643,7 +647,8 @@ def main() -> None:
             build_sector_cache()
         except Exception as e:
             logger.error(f"업종 캐시 빌드 실패: {e}")
-    threading.Thread(target=_build_cache, daemon=True).start()
+    if not (load_sector_cache() and sector.SECTOR_CACHE_DATE == datetime.now(KST).strftime("%Y-%m-%d")):
+        threading.Thread(target=_build_cache, daemon=True).start()
 
     app = (
         Application.builder()

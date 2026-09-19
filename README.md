@@ -77,7 +77,35 @@
 /compare 삼성전자 AAPL        # 한국+미국 혼용 가능
 ```
 
+### 🩺 상태 확인 (`/health`)
+네이버 등 외부 스크래핑 소스별 성공/실패 횟수를 확인합니다 (재시작 이후 누적).
+실패율이 높으면 로그에 경고가 남고, `ADMIN_CHAT_ID`를 설정하면 텔레그램으로도 알림이 옵니다.
+
 ---
+
+## 🗂️ 프로젝트 구조
+
+| 파일 | 역할 |
+|---|---|
+| `bot.py` | 텔레그램 핸들러, 엔트리포인트 (`python bot.py`) |
+| `config.py` | 환경변수, 로깅, 공용 상수, 관리자 알림 |
+| `data.py` | 종목 리스트, 한국/미국 데이터 수집, 스크래핑 모니터 |
+| `scoring.py` | 팩터 스코어링, 메시지 포맷 |
+| `screening.py` | 스크리닝 유니버스, 조건 파싱 |
+| `sector.py` | 업종 평균 캐시(파일 저장) 및 업종 상대평가 |
+| `backtest.py` | 단일/포트폴리오 백테스트 |
+| `analysis.py` | 상관계수, 팩터 비교 |
+| `kis_api.py` | 한국투자증권 API (외국인/기관 수급) |
+| `test_bot.py` | 네트워크 없이 도는 스모크 테스트 (`python test_bot.py`) |
+
+## ⚙️ 환경변수
+
+| 이름 | 필수 | 설명 |
+|---|---|---|
+| `BOT_TOKEN` | ✅ | 텔레그램 봇 토큰 |
+| `KIS_APPKEY`, `KIS_APPSECRET`, `KIS_ACCOUNT` | | 한국투자증권 API (없으면 수급 지표 제외) |
+| `ADMIN_CHAT_ID` | | 스크래핑 실패/유니버스 이상 알림을 받을 텔레그램 chat id |
+| `SECTOR_CACHE_PATH` | | 업종 캐시 저장 경로 (기본 `sector_cache.json`). Railway는 볼륨 경로를 지정해야 재배포 후에도 유지 |
 
 ## 🛠️ 기술 스택
 
@@ -178,7 +206,35 @@ Compares value/quality/momentum metrics of two stocks side by side, highlighting
 /compare 삼성전자 AAPL        # Korea + US mix supported
 ```
 
+### 🩺 Health (`/health`)
+Shows success/failure counts per external scraping source (since last restart).
+High failure rates are logged, and sent to Telegram if `ADMIN_CHAT_ID` is set.
+
 ---
+
+## 🗂️ Project Structure
+
+| File | Role |
+|---|---|
+| `bot.py` | Telegram handlers, entrypoint (`python bot.py`) |
+| `config.py` | Env vars, logging, shared constants, admin alerts |
+| `data.py` | Stock lists, KR/US data fetching, scrape monitor |
+| `scoring.py` | Factor scoring and message formatting |
+| `screening.py` | Screening universe and condition parsing |
+| `sector.py` | Sector average cache (persisted to file) and sector comparison |
+| `backtest.py` | Single-stock / portfolio backtests |
+| `analysis.py` | Correlation and factor comparison |
+| `kis_api.py` | KIS API (foreign/institutional flows) |
+| `test_bot.py` | Offline smoke tests (`python test_bot.py`) |
+
+## ⚙️ Environment Variables
+
+| Name | Required | Description |
+|---|---|---|
+| `BOT_TOKEN` | ✅ | Telegram bot token |
+| `KIS_APPKEY`, `KIS_APPSECRET`, `KIS_ACCOUNT` | | KIS API (flow metrics skipped if unset) |
+| `ADMIN_CHAT_ID` | | Telegram chat id for scraping/universe alerts |
+| `SECTOR_CACHE_PATH` | | Sector cache file path (default `sector_cache.json`); on Railway point it at a mounted volume to survive redeploys |
 
 ## 🛠️ Tech Stack
 

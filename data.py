@@ -7,7 +7,7 @@ from datetime import datetime
 import pandas as pd
 import requests
 import yfinance as yf
-from config import HEADERS, STOCK_MAP, logger
+from config import HEADERS, STOCK_MAP, logger, notify_admin
 
 
 # ============================================================
@@ -261,9 +261,10 @@ def record_scrape(source: str, ok: bool) -> None:
     stats = SCRAPE_STATS.setdefault(source, [0, 0])
     stats[0 if ok else 1] += 1
     total = sum(stats)
-    # ponytail: 50건마다 실패율만 로그, 텔레그램 푸시 알림은 ADMIN_CHAT_ID 생기면 추가
     if total % 50 == 0 and stats[1] / total > 0.5:
-        logger.warning(f"스크래핑 실패율 높음 [{source}]: {stats[1]}/{total} — 사이트 구조 변경 의심")
+        msg = f"스크래핑 실패율 높음 [{source}]: {stats[1]}/{total} — 사이트 구조 변경 의심"
+        logger.warning(msg)
+        notify_admin(f"scrape:{source}", f"⚠️ {msg}")
 
 def _naver_infos(code: str) -> dict:
     """네이버 모바일 API totalInfos → {code: value}."""

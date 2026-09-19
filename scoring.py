@@ -1,6 +1,7 @@
 """팩터 스코어링/메시지 포맷팅"""
 
 import re
+import time
 import numpy as np
 from data import get_kor_stock_data, get_us_stock_data, is_holding_company, search_kor_stock
 from sector import SECTOR_CACHE, get_sector_comparison
@@ -805,7 +806,25 @@ def format_factor_message(data):
 # 통합 처리
 # ============================================================
 
+_FACTOR_CACHE: dict = {}  # {질의: (저장시각, 결과 메시지)}
+FACTOR_CACHE_TTL = 600
+
+
 def process_factor(query):
+    """/factor 결과를 10분간 캐시 (같은 종목 반복 조회 시 재수집 방지)."""
+    key = query.strip().lower()
+    hit = _FACTOR_CACHE.get(key)
+    if hit and time.time() - hit[0] < FACTOR_CACHE_TTL:
+        return hit[1]
+    result = _process_factor(query)
+    if result:
+        if len(_FACTOR_CACHE) >= 200:
+            _FACTOR_CACHE.clear()
+        _FACTOR_CACHE[key] = (time.time(), result)
+    return result
+
+
+def _process_factor(query):
     query = query.strip()
 
     # 영문자만으로 구성된 경우 → 미국 주식 먼저 시도
