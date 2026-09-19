@@ -755,9 +755,14 @@ def calc_piotroski_fscore(t_obj, data: dict) -> tuple[int, list]:
                 details.append("❌ 유동비율 하락")
 
         # 7. 신주발행 없음 (주식수 동일 or 감소)
-        # yfinance 데이터 한계로 간소화: 일단 통과
-        score += 1
-        details.append("✅ 신주발행 체크 (간소화)")
+        sh = safe_get(bs, "Ordinary Shares Number") or safe_get(bs, "Share Issued")
+        sh_p = safe_get(bs, "Ordinary Shares Number", 1) or safe_get(bs, "Share Issued", 1)
+        if sh and sh_p:
+            if sh <= sh_p:
+                score += 1
+                details.append("✅ 신주발행 없음")
+            else:
+                details.append("❌ 주식수 증가 (신주발행)")
 
         # === 운영 효율 (2개) ===
         # 8. 매출총이익률 개선
