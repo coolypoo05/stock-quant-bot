@@ -20,6 +20,9 @@ logging.basicConfig(
 
 logger = logging.getLogger("bot")
 
+# httpx가 요청 URL(텔레그램 봇 토큰 포함)을 INFO로 남기는 것을 차단
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 if not BOT_TOKEN:
