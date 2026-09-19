@@ -269,6 +269,18 @@ def calc_debt_to_equity(t) -> float | None:
 # 네이버 금융 fallback (한국 주식 PER/PBR)
 # ============================================================
 
+SCRAPE_STATS: dict = {}  # {소스: [성공, 실패]}
+
+
+def record_scrape(source: str, ok: bool) -> None:
+    stats = SCRAPE_STATS.setdefault(source, [0, 0])
+    stats[0 if ok else 1] += 1
+    total = sum(stats)
+    # ponytail: 50건마다 실패율만 로그, 텔레그램 푸시 알림은 ADMIN_CHAT_ID 생기면 추가
+    if total % 50 == 0 and stats[1] / total > 0.5:
+        logger.warning(f"스크래핑 실패율 높음 [{source}]: {stats[1]}/{total} — 사이트 구조 변경 의심")
+
+
 def get_naver_per_pbr(code: str) -> dict:
     """네이버 금융에서 PER, PBR 파싱."""
     result = {"per": None, "pbr": None}
@@ -303,7 +315,9 @@ def get_naver_per_pbr(code: str) -> dict:
             if pbr_m and result["pbr"] is None:
                 result["pbr"] = float(pbr_m.group(1))
 
+        record_scrape("naver", result["pbr"] is not None)
     except Exception as e:
+        record_scrape("naver", False)
         logger.debug(f"네이버 PER/PBR 파싱 실패 ({code}): {e}")
     return result
 
@@ -315,6 +329,7 @@ def get_wisereport_forward_eps(code: str) -> float | None:
         referer = f"https://finance.naver.com/item/coinfo.naver?code={code}"
         res = requests.get(url, headers={**HEADERS, "Referer": referer}, timeout=10)
         res.raise_for_status()
+        record_scrape("wisereport", True)
         soup = BeautifulSoup(res.text, "html.parser")
         text = soup.get_text(" ", strip=True)
 
@@ -337,6 +352,7 @@ def get_wisereport_forward_eps(code: str) -> float | None:
 
         return None
     except Exception as e:
+        record_scrape("wisereport", False)
         logger.debug(f"wisereport Forward EPS 파싱 실패 ({code}): {e}")
         return None
 
@@ -2920,6 +2936,17 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     threading.Thread(target=_build, daemon=True).start()
 
 
+async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """스크래핑 소스별 성공/실패 현황."""
+    if not SCRAPE_STATS:
+        await update.message.reply_text("아직 스크래핑 기록이 없어요.")
+        return
+    lines = ["🩺 스크래핑 상태 (재시작 이후)"]
+    for src, (ok, fail) in SCRAPE_STATS.items():
+        lines.append(f"• {src}: 성공 {ok} / 실패 {fail} ({fail / (ok + fail):.0%} 실패)")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def corr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/corr 삼성전자 SK하이닉스 AAPL [6m/1y/3y]"""
     if not context.args or len(context.args) < 2:
@@ -3847,6 +3874,7 @@ def main() -> None:
     app.add_handler(CommandHandler("corr", corr_cmd))
     app.add_handler(CommandHandler("compare", compare_cmd))
     app.add_handler(CommandHandler("sector_update", sector_update_cmd))
+    app.add_handler(CommandHandler("health", health_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # 매일 새벽 6시 업종 캐시 갱신 (threading 스케줄러)
