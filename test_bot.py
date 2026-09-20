@@ -82,6 +82,29 @@ def test_sector_cache_roundtrip():
     assert sector.SECTOR_CACHE["Technology"]["per"] == 18.2 and sector.SECTOR_CACHE_DATE == "2026-09-20"
 
 
+def test_sector_cache_date_uses_kst():
+    # 서버가 UTC여도 저장 날짜는 KST 기준 (UTC 21:00 = KST 다음날 06:00)
+    import datetime as real
+
+    class FakeDT:
+        @staticmethod
+        def now(tz=None):
+            return real.datetime(2026, 9, 21, 6, 0, tzinfo=tz) if tz else real.datetime(2026, 9, 20, 21, 0)
+
+    saved = (sector.datetime, sector.fetch_stock_quick, sector.time.sleep, sector.SECTOR_CACHE_PATH, list(sector.SCREENING_UNIVERSE))
+    sector.datetime = FakeDT
+    sector.fetch_stock_quick = lambda item: {"sector": "Technology", "pe_ratio": 10, "pb_ratio": 1, "roe": 15}
+    sector.time.sleep = lambda s: None
+    sector.SECTOR_CACHE_PATH = os.path.join(tempfile.mkdtemp(), "sc.json")
+    sector.SCREENING_UNIVERSE[:] = [{"code": "1", "name": "X", "suffix": "", "market": "SP500"}]
+    try:
+        sector.build_sector_cache()
+        assert sector.SECTOR_CACHE_DATE == "2026-09-21"
+    finally:
+        sector.datetime, sector.fetch_stock_quick, sector.time.sleep, sector.SECTOR_CACHE_PATH = saved[:4]
+        sector.SCREENING_UNIVERSE[:] = saved[4]
+
+
 def test_factor_cache():
     calls = []
     orig = scoring._process_factor

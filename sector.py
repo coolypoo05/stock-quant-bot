@@ -4,7 +4,7 @@ import json
 import os
 import time
 from datetime import datetime
-from config import logger
+from config import KST, logger
 from screening import SCREENING_UNIVERSE, fetch_stock_quick
 
 
@@ -76,7 +76,7 @@ def build_sector_cache():
 
     SECTOR_CACHE.clear()
     SECTOR_CACHE.update(cache)
-    SECTOR_CACHE_DATE = datetime.now().strftime("%Y-%m-%d")
+    SECTOR_CACHE_DATE = datetime.now(KST).strftime("%Y-%m-%d")
     logger.info(f"업종 캐시 완료: {len(cache)}개 업종, {sum(v['count'] for v in cache.values())}개 종목")
     save_sector_cache()
 

@@ -127,39 +127,6 @@ def get_price(code: str) -> dict | None:
 
 
 # ============================================================
-# 국내 주식 기본 정보 (재무 지표)
-# ============================================================
-
-def get_stock_info(code: str) -> dict | None:
-    """주식 기본 정보 조회 (CTPF1002R) - ROE, 부채비율 등."""
-    headers = get_headers("CTPF1002R")
-    if not headers:
-        return None
-    try:
-        url = f"{BASE_URL}/uapi/domestic-stock/v1/quotations/search-stock-info"
-        params = {
-            "PRDT_TYPE_CD": "300",
-            "PDNO": code,
-        }
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            logger.warning(f"KIS 기본정보 조회 실패 ({code}): {data.get('msg1')}")
-            return None
-        output = data.get("output", {})
-        return {
-            "name": output.get("prdt_abrv_name", ""),       # 종목명
-            "sector": output.get("std_idst_clsf_cd_name", ""),  # 업종
-            "market": output.get("mket_id_cd", ""),          # 시장 구분
-            "listed_shares": int(output.get("lstg_stqt", 0) or 0),  # 상장주수
-        }
-    except Exception as e:
-        logger.error(f"KIS 기본정보 조회 오류 ({code}): {e}")
-        return None
-
-
-# ============================================================
 # 국내 주식 재무 비율
 # ============================================================
 
