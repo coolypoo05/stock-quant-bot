@@ -14,6 +14,7 @@ from scoring import process_factor
 from config import BOT_TOKEN, KST, logger
 import sector
 from flow import run_flow_snapshot
+from snapshot import describe, save_factor_rows, summary
 from sector import SECTOR_CACHE, build_sector_cache, load_sector_cache
 
 
@@ -69,7 +70,7 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     def _build():
         try:
-            build_sector_cache()
+            rebuild_sector_cache_and_snapshot()
             asyncio.run_coroutine_threadsafe(
                 context.bot.send_message(
                     chat_id=chat_id,
@@ -85,15 +86,28 @@ async def sector_update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     import threading
     threading.Thread(target=_build, daemon=True).start()
 
+def format_health() -> str:
+    lines = []
+    if SCRAPE_STATS:
+        lines.append("🩺 스크래핑 상태 (재시작 이후)")
+        for src, (ok, fail) in SCRAPE_STATS.items():
+            lines.append(f"• {src}: 성공 {ok} / 실패 {fail} ({fail / (ok + fail):.0%} 실패)")
+    else:
+        lines.append("아직 스크래핑 기록이 없어요.")
+    lines.append(describe(summary()))
+    return "\n".join(lines)
+
+
 async def health_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """스크래핑 소스별 성공/실패 현황."""
-    if not SCRAPE_STATS:
-        await update.message.reply_text("아직 스크래핑 기록이 없어요.")
-        return
-    lines = ["🩺 스크래핑 상태 (재시작 이후)"]
-    for src, (ok, fail) in SCRAPE_STATS.items():
-        lines.append(f"• {src}: 성공 {ok} / 실패 {fail} ({fail / (ok + fail):.0%} 실패)")
-    await update.message.reply_text("\n".join(lines))
+    """스크래핑 소스별 성공/실패 현황과 팩터 스냅샷 저장 현황."""
+    await update.message.reply_text(format_health())
+
+
+def rebuild_sector_cache_and_snapshot() -> None:
+    """업종 캐시를 다시 만들고, 같은 조회 결과를 팩터 스냅샷으로 저장 (스냅샷 실패는 캐시에 영향 없음)."""
+    rows = build_sector_cache()
+    save_factor_rows(rows, expected=len(SCREENING_UNIVERSE))
+
 
 async def corr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/corr 삼성전자 SK하이닉스 AAPL [6m/1y/3y]"""
@@ -645,7 +659,7 @@ def main() -> None:
     import threading
     def _build_cache():
         try:
-            build_sector_cache()
+            rebuild_sector_cache_and_snapshot()
         except Exception as e:
             logger.error(f"업종 캐시 빌드 실패: {e}")
     if not (load_sector_cache() and sector.SECTOR_CACHE_DATE == datetime.now(KST).strftime("%Y-%m-%d")):

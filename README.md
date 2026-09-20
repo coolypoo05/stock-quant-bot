@@ -94,6 +94,7 @@
 | `screening.py` | 스크리닝 유니버스, 조건 파싱 |
 | `sector.py` | 업종 평균 캐시(파일 저장) 및 업종 상대평가 |
 | `flow.py` | 외국인/기관 수급 분포 일별 스냅샷, 채점 밴드 이탈 감시 |
+| `snapshot.py` | 팩터 입력값 일별 스냅샷(SQLite) 저장·요약 |
 | `backtest.py` | 단일/포트폴리오 백테스트 |
 | `analysis.py` | 상관계수, 팩터 비교 |
 | `kis_api.py` | 한국투자증권 API (외국인/기관 수급) |
@@ -108,6 +109,7 @@
 | `ADMIN_CHAT_ID` | | 스크래핑 실패/유니버스 이상 알림을 받을 텔레그램 chat id |
 | `SECTOR_CACHE_PATH` | | 업종 캐시 저장 경로 (기본 `sector_cache.json`). Railway는 볼륨 경로를 지정해야 재배포 후에도 유지 |
 | `FLOW_SNAPSHOT_PATH` | | 수급 분포 스냅샷 저장 경로 (기본 `flow_snapshots.jsonl`, 매일 새벽 갱신 시 한 줄 추가) |
+| `SNAPSHOT_DB_PATH` | | 팩터 입력값 스냅샷 DB 경로 (기본 `factor_snapshots.db`). 매일 새벽 유니버스의 경량 팩터 입력값과 한국 수급 강도를 저장, 볼륨 경로 권장 |
 | `KIS_TOKEN_PATH` | | KIS 액세스 토큰 저장 경로 (기본 `kis_token.json`). 재시작 후에도 토큰을 재사용해 발급 제한(1분 1회)을 피함, 볼륨 경로 권장 |
 
 ## 🛠️ 기술 스택
@@ -226,6 +228,7 @@ High failure rates are logged, and sent to Telegram if `ADMIN_CHAT_ID` is set.
 | `screening.py` | Screening universe and condition parsing |
 | `sector.py` | Sector average cache (persisted to file) and sector comparison |
 | `flow.py` | Daily snapshot of foreign/institutional flow distribution, band drift monitor |
+| `snapshot.py` | Daily factor-input snapshots (SQLite) |
 | `backtest.py` | Single-stock / portfolio backtests |
 | `analysis.py` | Correlation and factor comparison |
 | `kis_api.py` | KIS API (foreign/institutional flows) |
@@ -240,6 +243,7 @@ High failure rates are logged, and sent to Telegram if `ADMIN_CHAT_ID` is set.
 | `ADMIN_CHAT_ID` | | Telegram chat id for scraping/universe alerts |
 | `SECTOR_CACHE_PATH` | | Sector cache file path (default `sector_cache.json`); on Railway point it at a mounted volume to survive redeploys |
 | `FLOW_SNAPSHOT_PATH` | | Flow distribution snapshot path (default `flow_snapshots.jsonl`, one line appended daily) |
+| `SNAPSHOT_DB_PATH` | | Factor input snapshot DB (default `factor_snapshots.db`); daily universe factor inputs and Korean flow intensity, mount a volume |
 | `KIS_TOKEN_PATH` | | KIS access token file (default `kis_token.json`); reused across restarts to avoid the 1/min issuance limit, point it at a mounted volume |
 
 ## 🛠️ Tech Stack

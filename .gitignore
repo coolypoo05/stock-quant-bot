@@ -7,3 +7,4 @@ sector_cache.json
 flow_snapshots.jsonl
 kis_token.json
 kis_token.json.tmp
+*.db-journal

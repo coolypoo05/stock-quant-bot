@@ -32,21 +32,25 @@ SECTOR_KO = {
 }
 
 def build_sector_cache():
-    """스크리닝 유니버스에서 업종별 평균 지표 계산."""
+    """스크리닝 유니버스에서 업종별 평균 지표를 계산하고, 조회한 종목별 결과 전체를 반환 (팩터 스냅샷용)."""
     global SECTOR_CACHE_DATE
 
     if not SCREENING_UNIVERSE:
         logger.warning("스크리닝 유니버스가 비어있어 업종 캐시 생성 불가")
-        return
+        return []
 
     logger.info("업종 평균 캐시 계산 중... (시간 소요)")
     sector_data = {}  # {sector: [{"per", "pbr", "roe", ...}]}
+    all_rows = []
 
     for item in SCREENING_UNIVERSE:
         try:
             data = fetch_stock_quick(item)
-            if not data or not data.get("sector"):
+            if not data:
                 continue
+            all_rows.append(data)
+            if not data.get("sector"):
+                continue  # 업종 평균에서는 제외하되 스냅샷에는 포함
             sector = data["sector"]
             if sector not in sector_data:
                 sector_data[sector] = []
@@ -79,6 +83,7 @@ def build_sector_cache():
     SECTOR_CACHE_DATE = datetime.now(KST).strftime("%Y-%m-%d")
     logger.info(f"업종 캐시 완료: {len(cache)}개 업종, {sum(v['count'] for v in cache.values())}개 종목")
     save_sector_cache()
+    return all_rows
 
 SECTOR_CACHE_PATH = os.environ.get("SECTOR_CACHE_PATH", "sector_cache.json")
 

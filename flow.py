@@ -8,6 +8,7 @@ from datetime import datetime
 import numpy as np
 
 import kis_api
+import snapshot
 from config import KST, logger, notify_admin
 from scoring import FLOW_BANDS, FLOW_FULL_ADV_EOK
 from screening import SCREENING_UNIVERSE
@@ -16,10 +17,10 @@ FLOW_SNAPSHOT_PATH = os.environ.get("FLOW_SNAPSHOT_PATH", "flow_snapshots.jsonl"
 MIN_SAMPLE = 50  # 이보다 적으면 분포로 쓰지 않음 (KIS 장애 등)
 
 
-def collect_flow_ratios(universe=None, pause: float = 0.2) -> list[float]:
-    """한국 유니버스 종목의 20일 거래량 대비 순매수(%). 유동성 부족 종목은 제외."""
+def collect_flow_rows(universe=None, pause: float = 0.2) -> list[dict]:
+    """한국 유니버스 종목별 수급 행 (유동성 낮은 종목 포함, 거래량 조회에 실패한 종목은 제외)."""
     universe = SCREENING_UNIVERSE if universe is None else universe
-    ratios = []
+    rows = []
     for item in universe:
         if item["market"] == "SP500":
             continue
@@ -28,9 +29,10 @@ def collect_flow_ratios(universe=None, pause: float = 0.2) -> list[float]:
         daily = kis_api.get_daily_volume(item["code"])
         time.sleep(pause)
         ratio, adv = kis_api.calc_flow_intensity(inv and inv["flows"], daily)
-        if ratio is not None and adv >= FLOW_FULL_ADV_EOK:
-            ratios.append(ratio)
-    return ratios
+        if ratio is not None:
+            rows.append({"code": item["code"], "ratio": ratio, "adv_eok": adv,
+                         "foreigner_amt_20d": inv["foreigner_amt_20d"], "institution_amt_20d": inv["institution_amt_20d"]})
+    return rows
 
 
 def summarize(ratios: list[float]) -> dict:
@@ -60,7 +62,10 @@ def save_snapshot(summary: dict, path: str | None = None) -> None:
 
 def run_flow_snapshot() -> dict | None:
     """수집 → 저장 → 이탈 시 관리자 알림. 하루 1회 실행 (약 10분 소요)."""
-    ratios = collect_flow_ratios()
+    rows = collect_flow_rows()
+    kr_count = sum(1 for item in SCREENING_UNIVERSE if item["market"] != "SP500")
+    snapshot.save_flow_rows(rows, expected=kr_count)
+    ratios = [r["ratio"] for r in rows if r["adv_eok"] >= FLOW_FULL_ADV_EOK]  # 분포는 유동성 충분 종목만
     if len(ratios) < MIN_SAMPLE:
         logger.warning(f"수급 분포 스냅샷 생략: 표본 {len(ratios)}개 (최소 {MIN_SAMPLE})")
         return None
