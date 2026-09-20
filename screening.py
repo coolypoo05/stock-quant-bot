@@ -6,6 +6,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 from config import HEADERS, logger, notify_admin
+from data import get_naver_per_pbr
 
 
 # ============================================================
@@ -247,8 +248,15 @@ def fetch_stock_quick(item: dict) -> dict | None:
             else:
                 market_cap_bil = market_cap / 1e6  # 백만달러
 
-        # PEG 직접 계산
         pe = info.get("trailingPE")
+        pb = info.get("priceToBook")
+        if item["suffix"] in (".KS", ".KQ") and (pe is None or pb is None):
+            # yfinance는 한국 종목의 PER/PBR을 주지 않아 네이버로 채움 (있는 값은 유지)
+            naver = get_naver_per_pbr(item["code"])
+            pe = pe if pe is not None else naver["per"]
+            pb = pb if pb is not None else naver["pbr"]
+
+        # PEG 직접 계산
         earnings_growth = info.get("earningsGrowth")
         peg = None
         if pe and pe > 0 and earnings_growth and earnings_growth > 0:
@@ -262,9 +270,9 @@ def fetch_stock_quick(item: dict) -> dict | None:
             "price": price,
             "market_cap_bil": market_cap_bil if market_cap else None,
             # 밸류
-            "pe_ratio": info.get("trailingPE"),
+            "pe_ratio": pe,
             "forward_pe": info.get("forwardPE"),
-            "pb_ratio": info.get("priceToBook"),
+            "pb_ratio": pb,
             "ps_ratio": info.get("priceToSalesTrailing12Months"),
             "ev_ebitda": None,
             "peg_ratio": peg,

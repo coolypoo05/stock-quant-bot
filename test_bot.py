@@ -451,6 +451,41 @@ def test_bot_health_text_and_snapshot_wiring():
     assert calls == {"rows": [{"code": "A"}], "expected": 2}
 
 
+def test_fetch_stock_quick_fills_kr_per_pbr_from_naver():
+    base = {"currentPrice": 10, "currency": "KRW", "marketCap": 1e12, "earningsGrowth": 0.25}
+    infos = {"005930.KS": dict(base),
+             "AAPL": {**base, "currency": "USD", "trailingPE": 30.0, "priceToBook": 40.0},
+             "000660.KS": {**base, "trailingPE": 8.0},  # 한국 종목인데 PER만 yfinance에 있음
+             "035420.KS": dict(base)}
+
+    class FakeTicker:
+        def __init__(self, tk):
+            self.info = dict(infos[tk])
+
+    naver_calls = []
+
+    def fake_naver(code):
+        naver_calls.append(code)
+        return {"per": None, "pbr": None} if code == "035420" else {"per": 12.5, "pbr": 1.2}
+
+    orig = (screening.yf.Ticker, screening.get_naver_per_pbr)
+    screening.yf.Ticker, screening.get_naver_per_pbr = FakeTicker, fake_naver
+    try:
+        def quick(code, suffix, market):
+            return screening.fetch_stock_quick({"code": code, "suffix": suffix, "name": code, "market": market})
+        kr = quick("005930", ".KS", "KOSPI200")
+        us = quick("AAPL", "", "SP500")
+        partial = quick("000660", ".KS", "KOSPI200")
+        missing = quick("035420", ".KS", "KOSPI200")
+    finally:
+        screening.yf.Ticker, screening.get_naver_per_pbr = orig
+    assert kr["pe_ratio"] == 12.5 and kr["pb_ratio"] == 1.2 and round(kr["peg_ratio"], 2) == 0.5  # 네이버로 채우고 PEG도 계산
+    assert us["pe_ratio"] == 30.0 and us["pb_ratio"] == 40.0
+    assert partial["pe_ratio"] == 8.0 and partial["pb_ratio"] == 1.2  # yfinance 값 우선, 없는 것만 채움
+    assert missing["pe_ratio"] is None and missing["pb_ratio"] is None  # 네이버도 값이 없으면 None(적자 등)
+    assert naver_calls == ["005930", "000660", "035420"]  # 미국 종목은 호출하지 않음
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
