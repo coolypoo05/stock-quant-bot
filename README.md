@@ -93,6 +93,7 @@
 | `scoring.py` | 팩터 스코어링, 메시지 포맷 |
 | `screening.py` | 스크리닝 유니버스, 조건 파싱 |
 | `sector.py` | 업종 평균 캐시(파일 저장) 및 업종 상대평가 |
+| `flow.py` | 외국인/기관 수급 분포 일별 스냅샷, 채점 밴드 이탈 감시 |
 | `backtest.py` | 단일/포트폴리오 백테스트 |
 | `analysis.py` | 상관계수, 팩터 비교 |
 | `kis_api.py` | 한국투자증권 API (외국인/기관 수급) |
@@ -106,6 +107,7 @@
 | `KIS_APPKEY`, `KIS_APPSECRET`, `KIS_ACCOUNT` | | 한국투자증권 API (없으면 수급 지표 제외) |
 | `ADMIN_CHAT_ID` | | 스크래핑 실패/유니버스 이상 알림을 받을 텔레그램 chat id |
 | `SECTOR_CACHE_PATH` | | 업종 캐시 저장 경로 (기본 `sector_cache.json`). Railway는 볼륨 경로를 지정해야 재배포 후에도 유지 |
+| `FLOW_SNAPSHOT_PATH` | | 수급 분포 스냅샷 저장 경로 (기본 `flow_snapshots.jsonl`, 매일 새벽 갱신 시 한 줄 추가) |
 
 ## 🛠️ 기술 스택
 
@@ -222,6 +224,7 @@ High failure rates are logged, and sent to Telegram if `ADMIN_CHAT_ID` is set.
 | `scoring.py` | Factor scoring and message formatting |
 | `screening.py` | Screening universe and condition parsing |
 | `sector.py` | Sector average cache (persisted to file) and sector comparison |
+| `flow.py` | Daily snapshot of foreign/institutional flow distribution, band drift monitor |
 | `backtest.py` | Single-stock / portfolio backtests |
 | `analysis.py` | Correlation and factor comparison |
 | `kis_api.py` | KIS API (foreign/institutional flows) |
@@ -235,6 +238,7 @@ High failure rates are logged, and sent to Telegram if `ADMIN_CHAT_ID` is set.
 | `KIS_APPKEY`, `KIS_APPSECRET`, `KIS_ACCOUNT` | | KIS API (flow metrics skipped if unset) |
 | `ADMIN_CHAT_ID` | | Telegram chat id for scraping/universe alerts |
 | `SECTOR_CACHE_PATH` | | Sector cache file path (default `sector_cache.json`); on Railway point it at a mounted volume to survive redeploys |
+| `FLOW_SNAPSHOT_PATH` | | Flow distribution snapshot path (default `flow_snapshots.jsonl`, one line appended daily) |
 
 ## 🛠️ Tech Stack
 

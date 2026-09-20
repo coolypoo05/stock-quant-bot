@@ -13,6 +13,7 @@ from data import SCRAPE_STATS, load_stock_map
 from scoring import process_factor
 from config import BOT_TOKEN, KST, logger
 import sector
+from flow import run_flow_snapshot
 from sector import SECTOR_CACHE, build_sector_cache, load_sector_cache
 
 
@@ -683,6 +684,10 @@ def main() -> None:
                 wait_sec = (next_run - now).total_seconds()
                 time.sleep(wait_sec)
                 _build_cache()
+                try:
+                    run_flow_snapshot()
+                except Exception as e:
+                    logger.error(f"수급 분포 스냅샷 실패: {e}")
             except Exception as e:
                 logger.error(f"업종 캐시 스케줄러 오류: {e}")
                 time.sleep(3600)

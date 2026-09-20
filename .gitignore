@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.db
 sector_cache.json
+flow_snapshots.jsonl

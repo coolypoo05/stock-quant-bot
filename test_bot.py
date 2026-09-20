@@ -6,7 +6,7 @@ os.environ.setdefault("BOT_TOKEN", "test")
 
 import pandas as pd  # noqa: E402
 
-import backtest, config, data, scoring, screening, sector  # noqa: E402
+import backtest, config, data, flow, kis_api, scoring, screening, sector  # noqa: E402
 
 
 def test_weighted_overall():
@@ -113,19 +113,80 @@ def test_coverage_shrinks_toward_neutral():
     assert scoring._finalize([], [], 100) == (0, ["데이터 부족"])
 
 
-def test_kr_flow_uses_cumulative_amount():
+def _kr_base():
     import numpy as np
     idx = pd.date_range("2025-01-01", periods=200)
     hist = pd.DataFrame({"Close": np.linspace(100, 150, 200), "High": 151.0, "Low": 99.0, "Volume": 1000.0}, index=idx)
-    base = {"history": hist, "market": "KR"}
-    _, d = scoring.score_momentum({**base, "foreigner_amt_20d": 50000, "institution_amt_20d": 30000,
-                                   "foreigner_amt_5d": 1000, "institution_amt_5d": -500})
-    assert any("동반 순매수" in x for x in d) and any("500억" in x for x in d)
-    _, d = scoring.score_momentum({**base, "foreigner_amt_20d": -50000, "institution_amt_20d": -30000,
-                                   "foreigner_amt_5d": 1, "institution_amt_5d": 1})
+    return {"history": hist, "market": "KR", "foreigner_amt_20d": 50000, "institution_amt_20d": 30000,
+            "foreigner_amt_5d": 1000, "institution_amt_5d": -500}
+
+
+def test_kr_flow_intensity_and_liquidity():
+    base = _kr_base()
+    # 유동성 충분: 거래량 대비 강도로 채점
+    _, d = scoring.score_momentum({**base, "flow_ratio_20d": 10.0, "adv_eok_20d": 500})
+    assert any("+10.0%" in x and "강한 순매수" in x for x in d) and any("500억" in x for x in d)
+    hi, _ = scoring.score_momentum({**base, "flow_ratio_20d": 10.0, "adv_eok_20d": 500})
+    # 유동성 부족(신뢰도 50%): 같은 강도라도 중립 쪽으로 보정
+    mid, d = scoring.score_momentum({**base, "flow_ratio_20d": 10.0, "adv_eok_20d": 5})
+    assert any("신뢰도 50%" in x for x in d) and mid < hi
+    # 저유동성: 수급 점수 제외
+    _, d = scoring.score_momentum({**base, "flow_ratio_20d": 10.0, "adv_eok_20d": 2})
+    assert any("저유동성" in x for x in d) and not any("→ 강한 순매수" in x for x in d)
+    # 거래량 조회 실패: 방향만
+    _, d = scoring.score_momentum(base)
+    assert any("동반 순매수" in x for x in d)
+    _, d = scoring.score_momentum({**base, "foreigner_amt_20d": -5, "institution_amt_20d": -3})
     assert any("동반 순매도" in x for x in d)
-    _, d = scoring.score_momentum(base)  # KIS 수급 없음 → 수급 섹션 생략
+    # KIS 수급 자체가 없으면 섹션 생략
+    _, d = scoring.score_momentum({"history": base["history"], "market": "KR"})
     assert not any("누적 순매수" in x for x in d)
+    assert scoring._flow_score(0.0) == (50, "중립") and scoring._flow_score(-99)[0] == 10 and scoring._flow_score(99)[0] == 90
+
+
+def test_calc_flow_intensity():
+    dates = [f"202601{d:02d}" for d in range(1, 21)]
+    flows = [(d, 60, 40) for d in dates]                       # 매일 순매수 100주
+    daily = [{"date": d, "close": 10000, "volume": 1000} for d in dates]
+    ratio, adv = kis_api.calc_flow_intensity(flows, daily)
+    assert round(ratio, 2) == 10.0 and round(adv, 2) == 0.1    # 거래량 대비 10%, 일 거래대금 0.1억
+    assert kis_api.calc_flow_intensity(flows, daily[:10]) == (None, None)  # 겹치는 일수 부족
+    assert kis_api.calc_flow_intensity(None, daily) == (None, None)
+
+
+def test_kis_get_retries_on_rate_limit():
+    class Resp:
+        def __init__(self, body):
+            self.status_code, self._b = 200, body
+
+        def json(self):
+            return self._b
+
+    seq = [Resp({"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "초당 거래건수 초과"}), Resp({"rt_cd": "0", "output": [1]})]
+    orig = (kis_api.get_headers, kis_api.requests.get, kis_api.time.sleep)
+    kis_api.get_headers = lambda tr: {"h": 1}
+    kis_api.requests.get = lambda *a, **k: seq.pop(0)
+    kis_api.time.sleep = lambda s: None
+    try:
+        assert kis_api._kis_get("X", "/p", {"FID_INPUT_ISCD": "1"}) == {"rt_cd": "0", "output": [1]}
+        seq[:] = [Resp({"rt_cd": "1", "msg1": "err"})]
+        assert kis_api._kis_get("X", "/p", {"FID_INPUT_ISCD": "1"}) is None  # 다른 오류는 재시도 없이 None
+    finally:
+        kis_api.get_headers, kis_api.requests.get, kis_api.time.sleep = orig
+
+
+def test_flow_summary_drift_and_snapshot():
+    import numpy as np
+    ok = flow.summarize(list(np.linspace(-12, 12, 101)))
+    assert ok["n"] == 101 and flow.check_drift(ok) is None       # 밴드 설계에 맞는 분포
+    shifted = flow.summarize(list(np.linspace(2, 30, 101)))      # 시장 전체가 순매수로 쏠림
+    msg = flow.check_drift(shifted)
+    assert msg and "중앙값" in msg
+    path = os.path.join(tempfile.mkdtemp(), "snap.jsonl")
+    flow.save_snapshot(ok, path)
+    flow.save_snapshot(shifted, path)
+    lines = open(path, encoding="utf-8").read().strip().splitlines()
+    assert len(lines) == 2 and __import__("json").loads(lines[0])["n"] == 101
 
 
 def test_dividend_percent_units():

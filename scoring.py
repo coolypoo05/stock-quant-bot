@@ -220,6 +220,29 @@ def score_quality(data):
 
     return _finalize(weighted_scores, details, 75 if holding else 100)
 
+# (외국인+기관) 20일 순매수 수량 / 20일 거래량 (%) 밴드. 시총 구간과 무관하게 분포가 비슷한 지표.
+# 코스피200+코스닥150 + 소형주 표본(일평균 거래대금 10억+ 356종목)의 분포에 맞춰 설정:
+# (p90-p10)/2=9.3, (p75-p25)/2=4.1, |r| 하위 15% 경계=1.0. flow.py가 매일 분포를 저장하고 이탈을 감시.
+FLOW_BANDS = [
+    (9.0, 90, "강한 순매수 ★"),
+    (4.0, 75, "뚜렷한 순매수"),
+    (1.0, 60, "소폭 순매수"),
+    (-1.0, 50, "중립"),
+    (-4.0, 40, "소폭 순매도"),
+    (-9.0, 25, "뚜렷한 순매도 ⚠️"),
+]
+# 일평균 거래대금 3억 미만은 표준편차 12.1/강한 신호 43%로 노이즈(3억 이상은 9.1/22%)
+FLOW_MIN_ADV_EOK = 3    # 일평균 거래대금(억원) 미만이면 수급 점수 제외
+FLOW_FULL_ADV_EOK = 10  # 이상이면 신뢰도 100%, 미만이면 비례해서 중립(50) 쪽으로 보정
+
+
+def _flow_score(ratio_pct):
+    for threshold, score, label in FLOW_BANDS:
+        if ratio_pct >= threshold:
+            return score, label
+    return 10, "강한 순매도 ⚠️"
+
+
 def score_momentum(data):
     """모멘텀 팩터 (가중치 기반).
     수급 20% / MA정배열 25% / 6M수익률 10% / 3M수익률 10% / 1M수익률 10%
@@ -403,9 +426,10 @@ def score_momentum(data):
     market = data.get("market", "")
 
     if market == "KR":
-        # 한국: KIS 외국인/기관 누적 순매수 (당일 값은 노이즈가 커서 20일 누적으로 판단)
+        # 한국: KIS 외국인/기관 20거래일 누적 순매수. 거래량 대비 강도로 채점하고 유동성이 낮으면 신뢰도를 낮춤
         f20, i20 = data.get("foreigner_amt_20d"), data.get("institution_amt_20d")
         f5, i5 = data.get("foreigner_amt_5d"), data.get("institution_amt_5d")
+        ratio, adv = data.get("flow_ratio_20d"), data.get("adv_eok_20d")
         if f20 is not None and i20 is not None:
             def eok(v):  # 백만원 → 억원
                 return f"{'▲' if v > 0 else '▼'}{abs(v) / 100:,.0f}억"
@@ -413,19 +437,27 @@ def score_momentum(data):
             details.append("\n👥 외국인/기관 누적 순매수 (20거래일)")
             details.append(f"   • 외국인 {eok(f20)} (최근 5일 {eok(f5)})")
             details.append(f"   • 기관 {eok(i20)} (최근 5일 {eok(i5)})")
-            if f20 > 0 and i20 > 0:
-                s = 85
-                details.append("   • 외국인+기관 동반 순매수 ★")
-            elif f20 > 0 or i20 > 0:
-                s = 65
-                details.append("   • 외국인/기관 중 한쪽 순매수")
-            elif f20 < 0 and i20 < 0:
-                s = 25
-                details.append("   • 외국인+기관 동반 순매도 ⚠️")
-            else:
-                s = 45
-                details.append("   • 수급 혼조")
-            weighted_scores.append((s, 20))
+            if ratio is not None and adv is not None:
+                if adv < FLOW_MIN_ADV_EOK:
+                    details.append(f"   • 거래량 대비 {ratio:+.1f}% — 일평균 거래대금 {adv:.1f}억 (저유동성: 수급 점수 제외)")
+                else:
+                    s, label = _flow_score(ratio)
+                    conf = min(1.0, adv / FLOW_FULL_ADV_EOK)
+                    s = int(50 + (s - 50) * conf)
+                    note = f" (일평균 거래대금 {adv:.0f}억, 신뢰도 {conf:.0%})" if conf < 1 else ""
+                    details.append(f"   • 거래량 대비 순매수 {ratio:+.1f}% → {label}{note}")
+                    weighted_scores.append((s, 20))
+            else:  # 거래량 조회 실패 시 방향만 판단
+                if f20 > 0 and i20 > 0:
+                    s = 85
+                    details.append("   • 외국인+기관 동반 순매수 ★")
+                elif f20 < 0 and i20 < 0:
+                    s = 25
+                    details.append("   • 외국인+기관 동반 순매도 ⚠️")
+                else:
+                    s = 50
+                    details.append("   • 수급 혼조")
+                weighted_scores.append((s, 20))
 
     elif market == "US":
         # 미국: 기관보유 + 공매도 + 내부자 (수급 대체 지표)
