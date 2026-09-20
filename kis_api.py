@@ -10,7 +10,6 @@ import os
 import time
 import logging
 import requests
-from datetime import datetime
 
 # .env 파일 로딩 (로컬 테스트용)
 try:
@@ -96,23 +95,10 @@ def get_headers(tr_id: str) -> dict | None:
 
 def get_price(code: str) -> dict | None:
     """주식 현재가 시세 조회 (FHKST01010100)."""
-    headers = get_headers("FHKST01010100")
-    if not headers:
-        return None
     try:
-        url = f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price"
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": code,
-        }
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        logger.debug(f"KIS 응답 코드: {res.status_code}")
-        if res.status_code != 200:
-            logger.error(f"KIS 응답 내용: {res.text[:500]}")
-        res.raise_for_status()
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            logger.warning(f"KIS 현재가 조회 실패 ({code}): {data.get('msg1')}")
+        data = _kis_get("FHKST01010100", "/uapi/domestic-stock/v1/quotations/inquire-price",
+                        {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
+        if not data:
             return None
         output = data.get("output", {})
         return {
@@ -179,21 +165,11 @@ def get_stock_info(code: str) -> dict | None:
 
 def get_financial_ratio(code: str) -> dict | None:
     """재무 비율 조회 (FHKST66430300) - ROE, 영업이익률 등."""
-    headers = get_headers("FHKST66430300")
-    if not headers:
-        return None
     try:
-        url = f"{BASE_URL}/uapi/domestic-stock/v1/finance/financial-ratio"
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": code,
-            "FID_DIV_CLS_CODE": "0",  # 0: 연간
-        }
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            logger.warning(f"KIS 재무비율 조회 실패 ({code}): {data.get('msg1')}")
+        data = _kis_get("FHKST66430300", "/uapi/domestic-stock/v1/finance/financial-ratio",
+                        {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code,
+                         "FID_DIV_CLS_CODE": "0"})  # 0: 연간
+        if not data:
             return None
         output_list = data.get("output", [])
         if not output_list:
@@ -223,27 +199,34 @@ def get_financial_ratio(code: str) -> dict | None:
 # 외국인/기관 수급
 # ============================================================
 
+def _kis_get(tr_id: str, path: str, params: dict, retries: int = 2) -> dict | None:
+    """KIS GET 호출. 초당 거래건수 초과(EGW00201)면 잠시 후 재시도, 실패 시 None."""
+    for attempt in range(retries + 1):
+        headers = get_headers(tr_id)
+        if not headers:
+            return None
+        res = requests.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=10)
+        try:
+            data = res.json()
+        except ValueError:
+            return None
+        if data.get("msg_cd") == "EGW00201" and attempt < retries:
+            time.sleep(1.0)
+            continue
+        if res.status_code != 200 or data.get("rt_cd") != "0":
+            logger.warning(f"KIS 조회 실패 ({tr_id} {params.get('FID_INPUT_ISCD')}): {data.get('msg1')}")
+            return None
+        return data
+    return None
+
+
 def get_investor_trend(code: str) -> dict | None:
-    """외국인/기관 순매수 동향 조회."""
-    # 시세 조회 계열은 모의/실전 모두 동일 TR_ID 사용
-    headers = get_headers("FHKST01010900")
-    if not headers:
-        return None
+    """외국인/기관 순매수 동향 조회 (최근 30거래일 일별 행)."""
     try:
-        url = f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor"
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": code,
-        }
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        logger.debug(f"KIS 수급 응답: {res.status_code} / {res.text[:200]}")
-        if res.status_code != 200:
-            return None
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            logger.warning(f"KIS 수급 조회 실패 ({code}): {data.get('msg1')}")
-            return None
-        output = data.get("output", [])
+        # 시세 조회 계열은 모의/실전 모두 동일 TR_ID 사용
+        data = _kis_get("FHKST01010900", "/uapi/domestic-stock/v1/quotations/inquire-investor",
+                        {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
+        output = (data or {}).get("output") or []
         if not output:
             return None
         today = output[0]
@@ -260,6 +243,9 @@ def get_investor_trend(code: str) -> dict | None:
             "institution_amt_5d": total("orgn_ntby_tr_pbmn", 5),
             "foreigner_amt_20d": total("frgn_ntby_tr_pbmn", 20),
             "institution_amt_20d": total("orgn_ntby_tr_pbmn", 20),
+            # 일별 (날짜, 외국인 순매수 수량, 기관 순매수 수량) - 거래량 대비 강도 계산용
+            "flows": [(r["stck_bsop_date"], int(r.get("frgn_ntby_qty", 0) or 0), int(r.get("orgn_ntby_qty", 0) or 0))
+                      for r in output[:20]],
         }
     except Exception as e:
         logger.error(f"KIS 수급 조회 오류 ({code}): {e}")
@@ -267,48 +253,35 @@ def get_investor_trend(code: str) -> dict | None:
 
 
 # ============================================================
-# 일봉 데이터
+# 일별 거래량
 # ============================================================
 
-def get_daily_prices(code: str, start_date: str, end_date: str = None) -> list | None:
-    """일봉 OHLCV 조회 (FHKST01010400).
-    start_date, end_date: 'YYYYMMDD' 형식
-    """
-    headers = get_headers("FHKST01010400")
-    if not headers:
-        return None
-    if not end_date:
-        end_date = datetime.now().strftime("%Y%m%d")
+def get_daily_volume(code: str) -> list | None:
+    """최근 30거래일 일별 종가/거래량 (FHKST01010400)."""
     try:
-        url = f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-price"
-        params = {
-            "FID_COND_MRKT_DIV_CODE": "J",
-            "FID_INPUT_ISCD": code,
-            "FID_INPUT_DATE_1": start_date,
-            "FID_INPUT_DATE_2": end_date,
-            "FID_PERIOD_DIV_CODE": "D",  # D: 일봉
-            "FID_ORG_ADJ_PRC": "0",      # 0: 수정주가
-        }
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        if data.get("rt_cd") != "0":
-            return None
-        output = data.get("output2", [])
-        result = []
-        for row in output:
-            result.append({
-                "date": row.get("stck_bsop_date", ""),
-                "open": int(row.get("stck_oprc", 0) or 0),
-                "high": int(row.get("stck_hgpr", 0) or 0),
-                "low": int(row.get("stck_lwpr", 0) or 0),
-                "close": int(row.get("stck_clpr", 0) or 0),
-                "volume": int(row.get("acml_vol", 0) or 0),
-            })
-        return result
+        data = _kis_get("FHKST01010400", "/uapi/domestic-stock/v1/quotations/inquire-daily-price",
+                        {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code,
+                         "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0"})
+        rows = (data or {}).get("output") or []
+        return [{"date": r["stck_bsop_date"], "close": int(r.get("stck_clpr", 0) or 0),
+                 "volume": int(r.get("acml_vol", 0) or 0)} for r in rows] or None
     except Exception as e:
-        logger.error(f"KIS 일봉 조회 오류 ({code}): {e}")
+        logger.error(f"KIS 일별 거래량 조회 오류 ({code}): {e}")
         return None
+
+
+def calc_flow_intensity(flows, daily, min_days: int = 15) -> tuple[float | None, float | None]:
+    """(외국인+기관 순매수 수량 ÷ 거래량 %, 일평균 거래대금 억원). 날짜가 겹치는 일수가 부족하면 (None, None)."""
+    if not flows or not daily:
+        return None, None
+    vols = {r["date"]: r for r in daily if r["volume"] > 0}
+    matched = [(f + o, vols[d]) for d, f, o in flows if d in vols]
+    if len(matched) < min_days:
+        return None, None
+    net = sum(n for n, _ in matched)
+    volume = sum(v["volume"] for _, v in matched)
+    adv_eok = sum(v["volume"] * v["close"] for _, v in matched) / len(matched) / 1e8
+    return net / volume * 100, adv_eok
 
 
 # ============================================================
@@ -321,6 +294,7 @@ def get_full_stock_data(code: str) -> dict | None:
         "price":    lambda: get_price(code),
         "ratio":    lambda: get_financial_ratio(code),
         "investor": lambda: get_investor_trend(code),
+        "daily":    lambda: get_daily_volume(code),
     }
 
     # KIS API 초당 호출 제한으로 순차 호출 (병렬 불가)
@@ -339,6 +313,7 @@ def get_full_stock_data(code: str) -> dict | None:
 
     ratio = results.get("ratio") or {}
     investor = results.get("investor") or {}
+    flow_ratio, adv_eok = calc_flow_intensity(investor.get("flows"), results.get("daily"))
 
     return {
         # 기본 정보
@@ -380,6 +355,8 @@ def get_full_stock_data(code: str) -> dict | None:
         "institution_amt_5d": investor.get("institution_amt_5d"),
         "foreigner_amt_20d": investor.get("foreigner_amt_20d"),
         "institution_amt_20d": investor.get("institution_amt_20d"),
+        "flow_ratio_20d": flow_ratio,  # (외국인+기관 순매수 수량 / 거래량) %, 20거래일
+        "adv_eok_20d": adv_eok,        # 일평균 거래대금 (억원)
         # yfinance 호환용 (None으로 채움 → fallback)
         "forward_pe": None,
         "forward_eps": None,

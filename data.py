@@ -497,7 +497,7 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             # 수급 정보 (KIS API)
             "foreigner_net": kis_data.get("foreigner_net") if kis_data else None,
             "institution_net": kis_data.get("institution_net") if kis_data else None,
-            **({k: kis_data.get(k) for k in ("foreigner_amt_5d", "institution_amt_5d", "foreigner_amt_20d", "institution_amt_20d")}
+            **({k: kis_data.get(k) for k in ("foreigner_amt_5d", "institution_amt_5d", "foreigner_amt_20d", "institution_amt_20d", "flow_ratio_20d", "adv_eok_20d")}
                if kis_data else {}),
         }
     except Exception as e:
