@@ -108,10 +108,11 @@
 | `ADMIN_CHAT_ID` | | 스크래핑 실패/유니버스 이상 알림을 받을 텔레그램 chat id |
 | `SECTOR_CACHE_PATH` | | 업종 캐시 저장 경로 (기본 `sector_cache.json`). Railway는 볼륨 경로를 지정해야 재배포 후에도 유지 |
 | `FLOW_SNAPSHOT_PATH` | | 수급 분포 스냅샷 저장 경로 (기본 `flow_snapshots.jsonl`, 매일 새벽 갱신 시 한 줄 추가) |
+| `KIS_TOKEN_PATH` | | KIS 액세스 토큰 저장 경로 (기본 `kis_token.json`). 재시작 후에도 토큰을 재사용해 발급 제한(1분 1회)을 피함, 볼륨 경로 권장 |
 
 ## 🛠️ 기술 스택
 
-- Python 3.13
+- Python 3.13 (`.python-version`)
 - python-telegram-bot
 - yfinance, pandas, numpy
 - matplotlib (차트 생성)
@@ -239,10 +240,11 @@ High failure rates are logged, and sent to Telegram if `ADMIN_CHAT_ID` is set.
 | `ADMIN_CHAT_ID` | | Telegram chat id for scraping/universe alerts |
 | `SECTOR_CACHE_PATH` | | Sector cache file path (default `sector_cache.json`); on Railway point it at a mounted volume to survive redeploys |
 | `FLOW_SNAPSHOT_PATH` | | Flow distribution snapshot path (default `flow_snapshots.jsonl`, one line appended daily) |
+| `KIS_TOKEN_PATH` | | KIS access token file (default `kis_token.json`); reused across restarts to avoid the 1/min issuance limit, point it at a mounted volume |
 
 ## 🛠️ Tech Stack
 
-- Python 3.13
+- Python 3.13 (`.python-version`)
 - python-telegram-bot
 - yfinance, pandas, numpy
 - matplotlib (chart generation)

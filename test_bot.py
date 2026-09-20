@@ -198,6 +198,64 @@ def test_kis_get_retries_on_rate_limit():
         kis_api.get_headers, kis_api.requests.get, kis_api.time.sleep = orig
 
 
+def test_kis_token_file_reuse_and_failure_cooldown():
+    class Resp:
+        def __init__(self, ok=True):
+            self.ok = ok
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise RuntimeError("403")
+
+        def json(self):
+            return {"access_token": "TOK", "expires_in": 86400}
+
+    posts = []
+    orig = (kis_api.requests.post, kis_api.time.sleep, kis_api.APPKEY, kis_api.APPSECRET, kis_api.KIS_TOKEN_PATH)
+    kis_api.time.sleep = lambda s: None
+    kis_api.APPKEY, kis_api.APPSECRET = "k", "s"
+    kis_api.KIS_TOKEN_PATH = os.path.join(tempfile.mkdtemp(), "tok.json")
+
+    def reset():
+        kis_api._token_cache.update(token=None, expires_at=0)
+
+    try:
+        # 발급 실패 → None, 대기 중에는 네트워크 호출 없이 None
+        reset()
+        kis_api._token_retry_after = 0.0
+        kis_api.requests.post = lambda *a, **k: posts.append(1) or Resp(ok=False)
+        assert kis_api.get_access_token() is None and len(posts) == 1
+        assert kis_api.get_access_token() is None and len(posts) == 1
+        # 대기 해제 후 발급 성공 → 파일 저장
+        kis_api._token_retry_after = 0.0
+        kis_api.requests.post = lambda *a, **k: posts.append(1) or Resp()
+        assert kis_api.get_access_token() == "TOK" and len(posts) == 2
+        if os.name != "nt":  # 토큰 파일은 소유자만 접근 가능해야 함 (Windows는 권한 비트가 무의미)
+            assert os.stat(kis_api.KIS_TOKEN_PATH).st_mode & 0o077 == 0
+        # 재시작 흉내: 메모리 캐시 삭제 → 파일에서 재사용, 발급 호출 없음
+        reset()
+        kis_api.requests.post = lambda *a, **k: (_ for _ in ()).throw(AssertionError("발급 호출 금지"))
+        assert kis_api.get_access_token() == "TOK"
+        # 다른 앱키로 저장된 토큰은 재사용하지 않음
+        reset()
+        kis_api.APPKEY = "other"
+        kis_api._token_retry_after = 0.0
+        kis_api.requests.post = lambda *a, **k: posts.append(1) or Resp()
+        assert kis_api.get_access_token() == "TOK" and len(posts) == 3
+    finally:
+        kis_api.requests.post, kis_api.time.sleep, kis_api.APPKEY, kis_api.APPSECRET, kis_api.KIS_TOKEN_PATH = orig
+        reset()
+        kis_api._token_retry_after = 0.0
+
+
+def test_bulleted_details_no_double_bullets():
+    nl = chr(10)
+    out = scoring._bulleted(["PER: 10", "📈 수익률", "   • 1M: +1%", nl + "📊 RSI: 50", "  → 실적 개선"])
+    expected = nl.join(["   • PER: 10", "📈 수익률", "   • 1M: +1%", "", "📊 RSI: 50", "  → 실적 개선", ""])
+    assert out == expected
+    assert "•    •" not in out
+
+
 def test_flow_summary_drift_and_snapshot():
     import numpy as np
     ok = flow.summarize(list(np.linspace(-12, 12, 101)))

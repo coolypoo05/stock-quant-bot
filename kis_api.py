@@ -6,7 +6,10 @@
 - 일봉 데이터
 """
 
+import hashlib
+import json
 import os
+import threading
 import time
 import logging
 import requests
@@ -35,42 +38,80 @@ if not APPKEY:
 BASE_URL = "https://openapivts.koreainvestment.com:29443"
 
 _token_cache = {"token": None, "expires_at": 0}
+_token_lock = threading.Lock()
+_token_retry_after = 0.0  # 발급 실패 후 이 시각 전에는 재시도하지 않음 (KIS는 토큰 발급이 1분 1회 제한)
+KIS_TOKEN_PATH = os.environ.get("KIS_TOKEN_PATH", "kis_token.json")
 
 
 # ============================================================
 # 인증 (토큰 발급)
 # ============================================================
 
-def get_access_token() -> str | None:
-    """액세스 토큰 발급 (캐싱 적용)."""
-    now = time.time()
-    if _token_cache["token"] and now < _token_cache["expires_at"]:
-        return _token_cache["token"]
+def _key_id() -> str:
+    return hashlib.sha256(APPKEY.encode()).hexdigest()[:16]
 
-    if not APPKEY or not APPSECRET:
-        logger.warning("KIS API 키가 설정되지 않았습니다.")
-        return None
 
-    url = f"{BASE_URL}/oauth2/tokenP"
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": APPKEY,
-        "appsecret": APPSECRET,
-    }
+def _load_token_file() -> bool:
+    """재시작 후에도 발급 제한(1분 1회)에 걸리지 않도록 저장된 유효 토큰을 재사용."""
     try:
-        res = requests.post(url, json=body, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        token = data.get("access_token")
-        expires_in = int(data.get("expires_in", 86400))
-        if token:
-            _token_cache["token"] = token
-            _token_cache["expires_at"] = now + expires_in - 60
-            logger.info("KIS API 토큰 발급 완료")
-            time.sleep(0.5)  # 초당 거래건수 초과 방지
-            return token
+        with open(KIS_TOKEN_PATH, encoding="utf-8") as f:
+            saved = json.load(f)
+        if saved.get("key") == _key_id() and saved["expires_at"] > time.time():
+            _token_cache.update(token=saved["token"], expires_at=saved["expires_at"])
+            logger.info("KIS API 토큰 파일 재사용")
+            return True
+    except FileNotFoundError:
+        pass
     except Exception as e:
-        logger.error(f"KIS API 토큰 발급 실패: {e}")
+        logger.warning(f"KIS 토큰 파일 로딩 실패: {e}")
+    return False
+
+
+def _save_token_file() -> None:
+    try:
+        tmp = KIS_TOKEN_PATH + ".tmp"
+        # 토큰은 인증 정보라 소유자만 읽고 쓰도록 생성 (기존 tmp가 남아 있어도 권한을 다시 맞춤)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"key": _key_id(), **_token_cache}, f)
+        os.replace(tmp, KIS_TOKEN_PATH)
+    except Exception as e:
+        logger.warning(f"KIS 토큰 파일 저장 실패: {e}")
+
+
+def get_access_token() -> str | None:
+    """액세스 토큰 (메모리 → 파일 → 신규 발급). 여러 스레드가 동시에 발급하지 않도록 락을 잡는다."""
+    global _token_retry_after
+    with _token_lock:
+        now = time.time()
+        if _token_cache["token"] and now < _token_cache["expires_at"]:
+            return _token_cache["token"]
+
+        if not APPKEY or not APPSECRET:
+            logger.warning("KIS API 키가 설정되지 않았습니다.")
+            return None
+        if _load_token_file():
+            return _token_cache["token"]
+        if now < _token_retry_after:
+            return None  # 직전 발급 실패로 대기 중
+
+        try:
+            res = requests.post(f"{BASE_URL}/oauth2/tokenP", timeout=10, json={
+                "grant_type": "client_credentials", "appkey": APPKEY, "appsecret": APPSECRET,
+            })
+            res.raise_for_status()
+            data = res.json()
+            token = data.get("access_token")
+            if token:
+                _token_cache.update(token=token, expires_at=now + int(data.get("expires_in", 86400)) - 60)
+                _save_token_file()
+                logger.info("KIS API 토큰 발급 완료")
+                time.sleep(0.5)  # 초당 거래건수 초과 방지
+                return token
+        except Exception as e:
+            logger.error(f"KIS API 토큰 발급 실패: {e}")
+        _token_retry_after = now + 61
     return None
 
 
@@ -166,8 +207,8 @@ def get_financial_ratio(code: str) -> dict | None:
 # 외국인/기관 수급
 # ============================================================
 
-def _kis_get(tr_id: str, path: str, params: dict, retries: int = 2) -> dict | None:
-    """KIS GET 호출. 초당 거래건수 초과(EGW00201)면 잠시 후 재시도, 실패 시 None."""
+def _kis_get(tr_id: str, path: str, params: dict, retries: int = 3) -> dict | None:
+    """KIS GET 호출. 초당 거래건수 초과(EGW00201)면 1초, 2초, 3초 간격으로 재시도, 실패 시 None."""
     for attempt in range(retries + 1):
         headers = get_headers(tr_id)
         if not headers:
@@ -178,7 +219,7 @@ def _kis_get(tr_id: str, path: str, params: dict, retries: int = 2) -> dict | No
         except ValueError:
             return None
         if data.get("msg_cd") == "EGW00201" and attempt < retries:
-            time.sleep(1.0)
+            time.sleep(1.0 * (attempt + 1))
             continue
         if res.status_code != 200 or data.get("rt_cd") != "0":
             logger.warning(f"KIS 조회 실패 ({tr_id} {params.get('FID_INPUT_ISCD')}): {data.get('msg1')}")

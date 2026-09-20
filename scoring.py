@@ -703,6 +703,17 @@ def grade_score(score):
 # 메시지 포맷팅
 # ============================================================
 
+def _bulleted(details) -> str:
+    """상세 줄 렌더링. 이미 들여쓰기/불릿이 있는 하위 줄과 소제목 줄은 그대로 두고 나머지에만 불릿을 붙인다."""
+    out = ""
+    for d in details:
+        if d.startswith(("  ", "\n")) or d[:1] in "📈📊📍📦👥":
+            out += f"{d}\n"
+        else:
+            out += f"   • {d}\n"
+    return out
+
+
 def format_factor_message(data):
     flag = "🇰🇷" if data["market"] == "KR" else "🇺🇸"
 
@@ -738,18 +749,15 @@ def format_factor_message(data):
     msg += "\n"
 
     msg += f"🟢 밸류: {value_score}점\n"
-    for d in value_details:
-        msg += f"   • {d}\n"
+    msg += _bulleted(value_details)
     msg += "\n"
 
     msg += f"🟡 퀄리티: {quality_score}점\n"
-    for d in quality_details:
-        msg += f"   • {d}\n"
+    msg += _bulleted(quality_details)
     msg += "\n"
 
     msg += f"🔴 모멘텀: {momentum_score}점\n"
-    for d in momentum_details:
-        msg += f"   • {d}\n"
+    msg += _bulleted(momentum_details)
     msg += "\n"
 
     msg += "━━━━━━━━━━━━━━━\n"
