@@ -431,8 +431,8 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             eps            = kis_data["eps"] or (info.get("trailingEps") if info else None)
             roe            = kis_data["roe"] / 100 if kis_data["roe"] else None
             debt_ratio     = kis_data["debt_to_equity"]
-            rev_growth     = kis_data["revenue_growth"] / 100 if kis_data["revenue_growth"] else None
-            div_yield      = kis_data["dividend_yield"] / 100 if kis_data["dividend_yield"] else (info.get("dividendYield") if info else None)
+            rev_growth     = kis_data["revenue_growth"] or None
+            div_yield      = kis_data["dividend_yield"] or (info.get("dividendYield") if info else None)
 
             # KIS 미제공 → yfinance fallback
             roa       = info.get("returnOnAssets") if info else None
@@ -497,6 +497,8 @@ def get_kor_stock_data(code: str, name: str, known_suffix: str = None):
             # 수급 정보 (KIS API)
             "foreigner_net": kis_data.get("foreigner_net") if kis_data else None,
             "institution_net": kis_data.get("institution_net") if kis_data else None,
+            **({k: kis_data.get(k) for k in ("foreigner_amt_5d", "institution_amt_5d", "foreigner_amt_20d", "institution_amt_20d")}
+               if kis_data else {}),
         }
     except Exception as e:
         logger.error(f"한국 주식 데이터 실패 ({code}): {e}")

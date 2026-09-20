@@ -226,22 +226,16 @@ def fetch_stock_quick(item: dict) -> dict | None:
             return None
 
         def pct(val):
-            """소수 → % 변환 (0.18 → 18.0), 이미 %면 그대로."""
-            if val is None:
-                return None
-            return val * 100 if abs(val) < 10 else val
+            """yfinance 소수 → % (0.18 → 18.0)."""
+            return None if val is None else val * 100
 
-        def div_pct(val):
-            """배당수익률: yfinance가 소수(0.035) 또는 %(3.5) 혼용 반환."""
-            if val is None:
-                return None
-            if val <= 0:
-                return None
-            if val < 0.2:
-                return round(val * 100, 2)  # 소수 → %
-            elif val <= 100:
-                return round(val, 2)  # 이미 %
-            return None  # 100% 초과는 오류
+        def div_yield_pct(val):
+            """yfinance(0.2.54+) 배당수익률은 이미 % 단위."""
+            return round(val, 2) if val and 0 < val <= 100 else None
+
+        def payout_pct(val):
+            """배당성향은 소수(0.62) → %."""
+            return round(val * 100, 1) if val and val > 0 else None
 
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         market_cap = info.get("marketCap")
@@ -283,9 +277,9 @@ def fetch_stock_quick(item: dict) -> dict | None:
             "debt_to_equity": info.get("debtToEquity"),
             "current_ratio": info.get("currentRatio"),
             "interest_coverage": None,  # t.info에 없어서 생략
-            # 배당 (yfinance는 항상 소수로 반환 → 무조건 × 100)
-            "dividend_yield": div_pct(info.get("dividendYield")),
-            "payout_ratio": div_pct(info.get("payoutRatio")),
+            # 배당 (수익률은 % 단위, 성향은 소수 → %)
+            "dividend_yield": div_yield_pct(info.get("dividendYield")),
+            "payout_ratio": payout_pct(info.get("payoutRatio")),
             # 성장 (% 변환)
             "revenue_growth": pct(info.get("revenueGrowth")),
             "earnings_growth": pct(info.get("earningsGrowth")),

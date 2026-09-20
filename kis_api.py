@@ -246,11 +246,20 @@ def get_investor_trend(code: str) -> dict | None:
         output = data.get("output", [])
         if not output:
             return None
-        today = output[0] if output else {}
+        today = output[0]
+
+        def total(key, days):  # 최신순 정렬된 일별 행을 days일 합산
+            return sum(int(r.get(key, 0) or 0) for r in output[:days])
+
         return {
             "foreigner_net": int(today.get("frgn_ntby_qty", 0) or 0),
             "institution_net": int(today.get("orgn_ntby_qty", 0) or 0),
-            "individual_net": int(today.get("indvd_ntby_qty", 0) or 0),
+            "individual_net": int(today.get("prsn_ntby_qty", 0) or 0),
+            # 누적 순매수 금액 (백만원)
+            "foreigner_amt_5d": total("frgn_ntby_tr_pbmn", 5),
+            "institution_amt_5d": total("orgn_ntby_tr_pbmn", 5),
+            "foreigner_amt_20d": total("frgn_ntby_tr_pbmn", 20),
+            "institution_amt_20d": total("orgn_ntby_tr_pbmn", 20),
         }
     except Exception as e:
         logger.error(f"KIS 수급 조회 오류 ({code}): {e}")
@@ -367,6 +376,10 @@ def get_full_stock_data(code: str) -> dict | None:
         "foreigner_net": investor.get("foreigner_net"),
         "institution_net": investor.get("institution_net"),
         "individual_net": investor.get("individual_net"),
+        "foreigner_amt_5d": investor.get("foreigner_amt_5d"),
+        "institution_amt_5d": investor.get("institution_amt_5d"),
+        "foreigner_amt_20d": investor.get("foreigner_amt_20d"),
+        "institution_amt_20d": investor.get("institution_amt_20d"),
         # yfinance 호환용 (None으로 채움 → fallback)
         "forward_pe": None,
         "forward_eps": None,

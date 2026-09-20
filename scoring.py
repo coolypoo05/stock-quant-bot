@@ -7,6 +7,20 @@ from data import get_kor_stock_data, get_us_stock_data, is_holding_company, sear
 from sector import SECTOR_CACHE, get_sector_comparison
 
 
+def _finalize(weighted_scores, details, nominal_weight):
+    """가중 평균. 확보한 지표 가중치가 명목 가중치보다 적으면 중립(50) 쪽으로 보정
+    (지표가 적을수록 점수가 극단으로 나오는 것을 방지)."""
+    if not weighted_scores:
+        return 0, ["데이터 부족"]
+    total = sum(w for _, w in weighted_scores)
+    raw = sum(s * w for s, w in weighted_scores) / total
+    coverage = min(1.0, total / nominal_weight)
+    score = int(50 + (raw - 50) * coverage)
+    if coverage < 1.0:
+        details.append(f"⚠️ 데이터 커버리지 {coverage:.0%} → {raw:.0f}점을 중립(50) 쪽으로 보정: {score}점")
+    return score, details
+
+
 def score_value(data):
     """밸류 팩터 (가중치 기반).
     Forward PER 20% / PER 20% / PEG 15% / PBR 20% / EV/EBITDA 10% / EPS성장률 10% / PSR 5%
@@ -121,15 +135,7 @@ def score_value(data):
         weighted_scores.append((s, 5))
         details.append(f"PSR: {ps:.2f}배")
 
-    if not weighted_scores:
-        return 0, ["데이터 부족"]
-
-    # 가중 평균 계산
-    total_weight = sum(w for _, w in weighted_scores)
-    weighted_sum = sum(s * w for s, w in weighted_scores)
-    final_score = int(weighted_sum / total_weight)
-
-    return final_score, details
+    return _finalize(weighted_scores, details, 100)
 
 def score_quality(data):
     """퀄리티 팩터 (가중치 기반).
@@ -142,7 +148,7 @@ def score_quality(data):
     # 1. ROE (25%)
     roe = data.get("roe")
     if roe is not None:
-        roe_pct = roe * 100 if abs(roe) < 1 else roe
+        roe_pct = roe * 100
         if roe_pct > 25:    s, g = 95, "매우 우수"
         elif roe_pct > 20:  s, g = 85, "우수"
         elif roe_pct > 15:  s, g = 75, "양호"
@@ -175,7 +181,7 @@ def score_quality(data):
     # 3. 영업이익률 (25%)
     op = data.get("operating_margin")
     if op is not None:
-        op_pct = op * 100 if abs(op) < 1 else op
+        op_pct = op * 100
         if holding:
             details.append(f"영업이익률: {op_pct:.2f}% (지주/금융 특성상 점수 제외)")
         else:
@@ -212,15 +218,7 @@ def score_quality(data):
             details.append(f"EPS: {eps:.2f} ({g}) ⚠️")
         weighted_scores.append((s, 10))
 
-    if not weighted_scores:
-        return 0, ["데이터 부족"]
-
-    # 가중 평균 계산
-    total_weight = sum(w for _, w in weighted_scores)
-    weighted_sum = sum(s * w for s, w in weighted_scores)
-    final_score = int(weighted_sum / total_weight)
-
-    return final_score, details
+    return _finalize(weighted_scores, details, 75 if holding else 100)
 
 def score_momentum(data):
     """모멘텀 팩터 (가중치 기반).
@@ -405,43 +403,28 @@ def score_momentum(data):
     market = data.get("market", "")
 
     if market == "KR":
-        # 한국: KIS API 외국인/기관 순매수
-        foreigner = data.get("foreigner_net")
-        institution = data.get("institution_net")
-        if foreigner is not None or institution is not None:
-            details.append("\n👥 외국인/기관 수급")
-            fg_str = ""
-            if foreigner is not None:
-                fg_sign = "▲" if foreigner > 0 else "▼"
-                fg_str = f"외국인 {fg_sign}{abs(foreigner):,}주"
-            inst_str = ""
-            if institution is not None:
-                inst_sign = "▲" if institution > 0 else "▼"
-                inst_str = f"기관 {inst_sign}{abs(institution):,}주"
-            if fg_str and inst_str:
-                details.append(f"   • {fg_str} / {inst_str}")
-            elif fg_str:
-                details.append(f"   • {fg_str}")
-            elif inst_str:
-                details.append(f"   • {inst_str}")
+        # 한국: KIS 외국인/기관 누적 순매수 (당일 값은 노이즈가 커서 20일 누적으로 판단)
+        f20, i20 = data.get("foreigner_amt_20d"), data.get("institution_amt_20d")
+        f5, i5 = data.get("foreigner_amt_5d"), data.get("institution_amt_5d")
+        if f20 is not None and i20 is not None:
+            def eok(v):  # 백만원 → 억원
+                return f"{'▲' if v > 0 else '▼'}{abs(v) / 100:,.0f}억"
 
-            if foreigner is not None and institution is not None:
-                if foreigner > 0 and institution > 0:
-                    s = 85
-                    details.append("   • 외국인+기관 동반 순매수 ★")
-                elif foreigner > 0 or institution > 0:
-                    s = 65
-                    details.append("   • 외국인/기관 순매수")
-                elif foreigner < 0 and institution < 0:
-                    s = 25
-                    details.append("   • 외국인+기관 동반 순매도 ⚠️")
-                else:
-                    s = 45
-                    details.append("   • 수급 혼조")
-            elif foreigner is not None:
-                s = 65 if foreigner > 0 else 35
+            details.append("\n👥 외국인/기관 누적 순매수 (20거래일)")
+            details.append(f"   • 외국인 {eok(f20)} (최근 5일 {eok(f5)})")
+            details.append(f"   • 기관 {eok(i20)} (최근 5일 {eok(i5)})")
+            if f20 > 0 and i20 > 0:
+                s = 85
+                details.append("   • 외국인+기관 동반 순매수 ★")
+            elif f20 > 0 or i20 > 0:
+                s = 65
+                details.append("   • 외국인/기관 중 한쪽 순매수")
+            elif f20 < 0 and i20 < 0:
+                s = 25
+                details.append("   • 외국인+기관 동반 순매도 ⚠️")
             else:
-                s = 65 if institution > 0 else 35
+                s = 45
+                details.append("   • 수급 혼조")
             weighted_scores.append((s, 20))
 
     elif market == "US":
@@ -456,7 +439,7 @@ def score_momentum(data):
 
             # 기관 보유비율 (40% of 수급)
             if inst_pct is not None:
-                inst_pct_val = inst_pct * 100 if inst_pct < 1 else inst_pct
+                inst_pct_val = inst_pct * 100
                 if inst_pct_val >= 80:    s = 90
                 elif inst_pct_val >= 60:  s = 75
                 elif inst_pct_val >= 40:  s = 55
@@ -477,7 +460,7 @@ def score_momentum(data):
 
             # 내부자 보유비율 (30% of 수급)
             if insider_pct is not None:
-                insider_val = insider_pct * 100 if insider_pct < 1 else insider_pct
+                insider_val = insider_pct * 100
                 if insider_val >= 10:    s = 80
                 elif insider_val >= 5:   s = 65
                 elif insider_val >= 1:   s = 50
@@ -497,21 +480,13 @@ def score_momentum(data):
                 else:
                     details.append("   • 수급 부정적 (기관 이탈/숏 많음) ⚠️")
 
-    if not weighted_scores:
-        return 0, ["데이터 부족"]
-
-    # 가중 평균 계산
-    total_weight = sum(w for _, w in weighted_scores)
-    weighted_sum = sum(s * w for s, w in weighted_scores)
-    final_score = int(weighted_sum / total_weight)
-
-    return final_score, details
+    return _finalize(weighted_scores, details, 100)
 
 def get_dividend_info(data):
     lines = []
     div = data.get("dividend_yield")
     if div:
-        div_pct = div * 100 if div < 1 else div
+        div_pct = div  # 이미 % 단위
         lines.append(f"배당수익률: {div_pct:.2f}%")
     else:
         lines.append("배당수익률: 정보없음 또는 무배당")
@@ -667,24 +642,14 @@ def check_risk_warnings(data: dict) -> tuple[int, list]:
     return penalty, warnings
 
 def calc_weighted_overall(value_score, quality_score, momentum_score) -> int:
-    """저평가 우량주 전략 가중치 적용 (밸류40 + 퀄리티40 + 모멘텀20)."""
-    weights = []
-    scores = []
-    if value_score > 0:
-        scores.append(value_score)
-        weights.append(0.4)
-    if quality_score > 0:
-        scores.append(quality_score)
-        weights.append(0.4)
-    if momentum_score > 0:
-        scores.append(momentum_score)
-        weights.append(0.2)
-    if not scores:
+    """저평가 우량주 전략 가중치 (밸류40 + 퀄리티40 + 모멘텀20).
+    데이터가 없는 팩터(0점)는 중립 50으로 계산 (있는 팩터로 가중치를 몰아주지 않음)."""
+    if not (value_score or quality_score or momentum_score):
         return 0
-    # 가중치 합 정규화
-    total_weight = sum(weights)
-    weighted_sum = sum(s * w for s, w in zip(scores, weights))
-    return int(weighted_sum / total_weight)
+    return int(
+        (value_score or 50) * 0.4 + (quality_score or 50) * 0.4 + (momentum_score or 50) * 0.2
+    )
+
 
 def grade_score(score):
     if score >= 80:

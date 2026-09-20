@@ -163,7 +163,7 @@ def get_sector_comparison(sector: str, data: dict) -> list[str]:
 
     # ROE (높을수록 우수)
     roe = data.get("roe")
-    if roe and roe < 1:
+    if roe is not None:
         roe = roe * 100
     line = compare("ROE", roe, avg.get("roe"), lower_is_better=False)
     if line:
@@ -171,7 +171,7 @@ def get_sector_comparison(sector: str, data: dict) -> list[str]:
 
     # 영업이익률 (높을수록 우수)
     op = data.get("operating_margin")
-    if op and op < 1:
+    if op is not None:
         op = op * 100
     line = compare("영업이익률", op, avg.get("operating_margin"), lower_is_better=False)
     if line:

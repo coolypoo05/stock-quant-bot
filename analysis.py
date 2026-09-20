@@ -335,7 +335,7 @@ def format_compare_result(data1: dict, data2: dict) -> str:
 
     def to_pct(val):
         if val is None: return None
-        return val * 100 if abs(val) < 1 else val
+        return val * 100
 
     msg = "📊 팩터 비교\n"
     msg += f"{'':>15} {name1:>10}    {name2:>10}\n"
